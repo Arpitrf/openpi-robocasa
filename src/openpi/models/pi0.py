@@ -279,6 +279,8 @@ class Pi0(_model.BaseModel):
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
         noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+        jax.debug.print("noise shape {}", noise.shape)
+
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
@@ -323,3 +325,120 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    def _prefix_kv_cache(self, observation: _model.Observation):
+        """Fills a KV cache with a forward pass of the prefix for ``observation``.
+
+        Returns the ``kv_cache`` and the ``prefix_mask``/``prefix_len`` needed to
+        compute per-step suffix attention against this prefix.
+        """
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        return kv_cache, prefix_mask, prefix_tokens.shape[1]
+
+    def _velocity(self, observation, x_t, time, kv_cache, prefix_mask, prefix_len):
+        """Evaluates the flow velocity field ``vθ(x_t, time | observation)`` using a
+        precomputed prefix ``kv_cache``."""
+        batch_size = x_t.shape[0]
+        suffix_tokens, suffix_mask, suffix_ar_mask = self.embed_suffix(
+            observation, x_t, jnp.broadcast_to(time, batch_size)
+        )
+        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+        full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+        assert full_attn_mask.shape == (
+            batch_size,
+            suffix_tokens.shape[1],
+            prefix_len + suffix_tokens.shape[1],
+        )
+        positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens], mask=full_attn_mask, positions=positions, kv_cache=kv_cache
+        )
+        assert prefix_out is None
+        return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+    @at.typecheck
+    def sample_actions_frs(
+        self,
+        observation: _model.Observation,
+        reference_observation: _model.Observation,
+        reference_action: _model.Actions,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+    ) -> tuple[_model.Actions, dict[str, at.Array]]:
+        """Flow Reversal Steering (FRS) action sampling.
+
+        Refines a coarse ``reference_action`` into an in-distribution action by
+        (1) integrating the flow backward to noise while conditioned on
+        ``reference_observation``, then (2) denoising that noise back to an action
+        while conditioned on ``observation``.
+
+        Returns ``(actions, diagnostics)`` where ``diagnostics`` contains the
+        post-reversal noise vector and global scalar stats computed over all
+        elements of ``noise_hat`` (batch, horizon, and action_dim):
+        - ``noise_hat``: recovered noise at ``t=1``
+        - ``noise_mean``: global mean of ``noise_hat``
+        - ``noise_std``: global std of ``noise_hat``
+
+        The caller selects the FRS variant by what it passes as
+        ``reference_observation``:
+        - Paper-faithful FRS: pass ``reference_observation == observation`` so both
+          passes condition on the current observation (matches the paper, where
+          ``a1_hat = mu(mu^-1(a1, o), o)`` reconstructs/steers toward ``a1``).
+        - Cross-scene FRS (experimental): pass a different
+          ``reference_observation`` (e.g. the scene the correction came from) to
+          transfer a correction across scenes. Note this breaks the paper's
+          reconstruction property, since the noise->action map is observation
+          dependent.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        reference_observation = _model.preprocess_observation(None, reference_observation, train=False)
+
+        # Same convention as `sample_actions`: t=1 is noise, t=0 is the action.
+        dt = 1.0 / num_steps
+
+        # Build a separate prefix KV cache for each scene.
+        kv_cache_ref, prefix_mask_ref, prefix_len_ref = self._prefix_kv_cache(reference_observation)
+        kv_cache_cur, prefix_mask_cur, prefix_len_cur = self._prefix_kv_cache(observation)
+
+        # (1) Flow reversal (noising): integrate forward in time from the reference
+        # action (t=0) to noise (t=1), conditioned on the reference scene.
+        def reverse_step(carry):
+            x_t, time = carry
+            v_t = self._velocity(
+                reference_observation, x_t, time, kv_cache_ref, prefix_mask_ref, prefix_len_ref
+            )
+            return x_t + dt * v_t, time + dt
+
+        def reverse_cond(carry):
+            _, time = carry
+            # robust to floating-point error
+            return time <= 1.0 - dt / 2
+
+        noise_hat, _ = jax.lax.while_loop(reverse_cond, reverse_step, (reference_action, 0.0))
+        diagnostics = {
+            "noise_hat": noise_hat,
+            "noise_mean": jnp.mean(noise_hat),
+            "noise_std": jnp.std(noise_hat),
+        }
+
+        # (2) Flow denoising: integrate backward in time from the recovered noise (t=1)
+        # to an action (t=0), conditioned on the current scene.
+        def denoise_step(carry):
+            x_t, time = carry
+            v_t = self._velocity(
+                observation, x_t, time, kv_cache_cur, prefix_mask_cur, prefix_len_cur
+            )
+            return x_t - dt * v_t, time - dt
+
+        def denoise_cond(carry):
+            _, time = carry
+            # robust to floating-point error
+            return time >= dt / 2
+
+        x_0, _ = jax.lax.while_loop(denoise_cond, denoise_step, (noise_hat, 1.0))
+        return x_0, diagnostics

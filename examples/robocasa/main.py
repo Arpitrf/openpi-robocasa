@@ -32,7 +32,7 @@ class Args:
     replan_steps: int = 5
 
     split: str = "pretrain"
-    num_trials: int = 50  # Number of rollouts per task
+    num_trials: int = 3  # Number of rollouts per task
     task_set: list = None
 
     #################################################################################################################

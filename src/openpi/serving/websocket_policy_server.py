@@ -57,18 +57,31 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
+                batch_size = obs.pop("__batch_size", None)
+
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                if batch_size is not None:
+                    batch_results = self._policy.infer_batch(obs, int(batch_size))
+                else:
+                    batch_results = None
+                    action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
-                if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
-
-                await websocket.send(packer.pack(action))
+                if batch_results is not None:
+                    response = {
+                        "__batch_results": batch_results,
+                        "server_timing": {"infer_ms": infer_time * 1000},
+                    }
+                    if prev_total_time is not None:
+                        response["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    await websocket.send(packer.pack(response))
+                else:
+                    action["server_timing"] = {
+                        "infer_ms": infer_time * 1000,
+                    }
+                    if prev_total_time is not None:
+                        action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    await websocket.send(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time
 
             except websockets.ConnectionClosed:
