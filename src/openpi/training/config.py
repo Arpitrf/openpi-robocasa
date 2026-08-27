@@ -191,12 +191,17 @@ class DataConfigFactory(abc.ABC):
             return norm_stats
         except FileNotFoundError:
             logging.info(f"Norm stats not found in {data_assets_dir}.")
-            # Fallback: try to read and convert stats from repo meta
-            # TODO: fix
-            converted = _groot_openpi_dataset._convert_stats_from_repo_meta(asset_id)
-            if converted is not None:
-                logging.info(f"Converted norm stats from repo meta for {asset_id}")
-                return converted
+            # Fallback: try to read and convert stats from repo meta, if that conversion is
+            # available. _convert_stats_from_repo_meta doesn't currently exist on
+            # groot_openpi_dataset (pre-existing, marked "TODO: fix" before this comment) --
+            # guard it so a first-time compute_norm_stats.py run degrades to computing stats
+            # from scratch (the normal, expected path) instead of crashing with AttributeError.
+            converter = getattr(_groot_openpi_dataset, "_convert_stats_from_repo_meta", None)
+            if converter is not None:
+                converted = converter(asset_id)
+                if converted is not None:
+                    logging.info(f"Converted norm stats from repo meta for {asset_id}")
+                    return converted
         return None
 
 
@@ -345,6 +350,48 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         model_transforms = ModelTransformFactory()(model_config)
 
         # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRobocasaHitlDataConfig(DataConfigFactory):
+    """Plain-LeRobot (not Groot) config for datasets written by
+    examples/robocasa/convert_hitl_hdf5_to_lerobot.py, which uses the image/wrist_image/state/
+    actions schema from Arpitrf/semantic_corrections's lerobot_export.py rather than
+    LeRobotRobocasaDataConfig's Groot format. Mirrors LeRobotLiberoDataConfig's repack pattern;
+    no delta-action transform, since RoboCasa's 12-dim action space (EE pos/rot deltas + gripper +
+    base motion + control mode) isn't joint angles and LeRobotRobocasaDataConfig doesn't apply one
+    either.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[robocasa_policy.RobocasaInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[robocasa_policy.RobocasaOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
         return dataclasses.replace(
             self.create_base_config(assets_dirs),
             repack_transforms=repack_transform,
@@ -986,6 +1033,39 @@ _CONFIGS = [
         keep_period=10000,
         batch_size=64,
         num_workers=4,
+    ),
+    TrainConfig(
+        # LoRA finetune of the base pi0 model on the 3 downloaded HITL CoffeeSetupMug demos,
+        # converted to a single 3-episode LeRobot dataset via
+        # examples/robocasa/convert_hitl_hdf5_to_lerobot.py (plain LeRobot schema borrowed from
+        # Arpitrf/semantic_corrections's lerobot_export.py). Requires running
+        # `scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora`
+        # first -- unlike LeRobotRobocasaDataConfig's data_dirs path, this repo_id-based config has
+        # no auto norm-stats fallback.
+        name="pi0_robocasa_coffeesetupmug_hitl_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_all3",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=4500,
+        save_interval=1500,
+        # Keep this well above num_train_steps: the checkpoint manager treats save_interval
+        # multiples as permanently-kept when keep_period matches, which fills disk fast on
+        # a small local dataset. max_to_keep=1 (set in checkpoints.py) already rotates
+        # intermediate checkpoints; only the final save needs to survive.
+        keep_period=100_000,
+        batch_size=8,
+        num_workers=2,
     ),
 ]
 

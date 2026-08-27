@@ -155,7 +155,8 @@ def create_torch_dataset(
             raise ValueError
 
     # Standard (openpi) LeRobot dataset loading
-    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+    # NOTE: lerobot==0.3.3 (pinned in this repo's env) moved this out of `lerobot.common`.
+    import lerobot.datasets.lerobot_dataset as lerobot_dataset
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
