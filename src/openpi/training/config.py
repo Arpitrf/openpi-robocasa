@@ -593,6 +593,16 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+# scripts/download_checkpoint.py fetches pi0_robocasa_pretrain_human300 (a RoboCasa-competent,
+# non-LoRA pi0_base checkpoint trained on the full pretrain_human300 soup) to this path. Used
+# below as the LoRA finetuning start point for the CoffeeSetupMug HITL configs, instead of
+# generic pi0_base, so those configs only have to learn the task-specific correction from ~1-3
+# demos, not RoboCasa's action space/cameras/embodiment from scratch too.
+_ROBOCASA_PRETRAIN_HUMAN300_PARAMS = os.path.expanduser(
+    "~/.cache/openpi/robocasa/robocasa365_checkpoints/pi0/pi0_robocasa_pretrain_human300/"
+    "multitask_learning/75000/params"
+)
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -1035,10 +1045,11 @@ _CONFIGS = [
         num_workers=4,
     ),
     TrainConfig(
-        # LoRA finetune of the base pi0 model on the 3 downloaded HITL CoffeeSetupMug demos,
-        # converted to a single 3-episode LeRobot dataset via
-        # examples/robocasa/convert_hitl_hdf5_to_lerobot.py (plain LeRobot schema borrowed from
-        # Arpitrf/semantic_corrections's lerobot_export.py). Requires running
+        # LoRA finetune of the RoboCasa-pretrained pi0 model (pi0_robocasa_pretrain_human300,
+        # NOT generic pi0_base -- see _ROBOCASA_PRETRAIN_HUMAN300_PARAMS above) on the 3
+        # downloaded HITL CoffeeSetupMug demos, converted to a single 3-episode LeRobot dataset
+        # via examples/robocasa/convert_hitl_hdf5_to_lerobot.py (plain LeRobot schema borrowed
+        # from Arpitrf/semantic_corrections's lerobot_export.py). Requires running
         # `scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora`
         # first -- unlike LeRobotRobocasaDataConfig's data_dirs path, this repo_id-based config has
         # no auto norm-stats fallback.
@@ -1052,7 +1063,7 @@ _CONFIGS = [
             repo_id="hitl_coffeesetupmug_all3",
             base_config=DataConfig(prompt_from_task=True),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
         freeze_filter=pi0.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
@@ -1067,6 +1078,43 @@ _CONFIGS = [
         batch_size=8,
         num_workers=2,
     ),
+] + [
+    TrainConfig(
+        # Same setup as pi0_robocasa_coffeesetupmug_hitl_lora, but trained on a single one of
+        # the 3 HITL demos rather than all 3 combined -- for comparing per-scene runs directly
+        # instead of pooling. repo_id must be converted first with
+        # examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffeesetupmug_<run>
+        # --raw_dataset_path data/CoffeeSetupMug/<run>/demo_0.hdf5 (single path, not all 3).
+        name=f"pi0_robocasa_coffeesetupmug_hitl_lora_run{i + 1}",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id=f"hitl_coffeesetupmug_{run}",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=3000,
+        save_interval=1000,
+        keep_period=100_000,
+        # 4 instead of 8: on the shared cluster this trains on, the first compiled train step
+        # consistently OOM'd at batch_size=8 (RESOURCE_EXHAUSTED allocating ~7.5GiB) even with
+        # >15GB nominally free on the GPU, reproducibly across 5 retries -- other tenants'
+        # processes leave the device too fragmented for one contiguous buffer that size.
+        batch_size=4,
+        num_workers=2,
+        # wandb.init()'s entity isn't a TrainConfig field (train.py doesn't pass one) -- set
+        # WANDB_ENTITY=robin-lab in the environment when launching to log there instead of the
+        # default personal entity.
+        project_name="semantic-corrections",
+    )
+    for i, run in enumerate(["2026-06-30-22-00", "2026-08-19-12-55", "2026-08-21-20-26"])
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
