@@ -57,14 +57,53 @@ rlds = [
     "tensorflow-cpu==2.15.0",
     "tensorflow-datasets==4.9.9",
 ]
+# config.py imports openpi.groot_utils.groot_openpi_dataset at module level, which imports
+# robocasa.utils.groot_utils.* unconditionally -- so this group is required just to import
+# openpi.training.config, not only for Groot-format training or eval. Not in the main
+# `dependencies` list because it genuinely conflicts with the `rlds` group (see `conflicts`
+# below): robocasa hard-pins numpy==2.2.5, tensorflow-cpu==2.15.0 (rlds) needs numpy<2.0.0.
+# Install with `uv sync --group robocasa`.
+robocasa = [
+    "robocasa",
+    "robosuite",
+]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+# robocasa's setup.py pins lerobot==0.3.3 (a real PyPI version) as its own dependency, but this
+# project's own lerobot dependency is redirected via [tool.uv.sources] to a specific git commit
+# whose own package metadata self-reports version "0.1.0" -- so uv's resolver sees those two
+# requests on lerobot as unsatisfiable together even though the source override should apply to
+# both. Overriding the version constraint entirely (unpinned) lets the [tool.uv.sources] git
+# source win regardless of which package in the graph asks for lerobot.
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "lerobot"]
+# This project already depends on jax[cuda12] (Linux/NVIDIA only, never worked on macOS/Windows),
+# so restrict resolution to Linux -- otherwise uv's default universal (all-platform) resolution
+# fails on an unrelated split (python>=3.13 + darwin) where robocasa's own lerobot==0.3.3 pin
+# can't resolve, even though the actual (Linux) target platform resolves fine.
+environments = ["sys_platform == 'linux'"]
+# robocasa (numpy==2.2.5) and rlds (tensorflow-cpu==2.15.0, numpy<2.0.0) can never be installed
+# together -- tell uv so it resolves each as its own valid lock instead of demanding one universal
+# solution that satisfies both simultaneously (which is impossible).
+conflicts = [
+    [
+        { group = "rlds" },
+        { group = "robocasa" },
+    ],
+]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
 dlimp = { git = "https://github.com/kvablack/dlimp", rev = "ad72ce3a9b414db2185bc0b38461d4101a65477a" }
+# config.py imports openpi.groot_utils.groot_openpi_dataset at module level, which imports
+# robocasa.utils.groot_utils.* unconditionally -- so robocasa (and its own robosuite dependency,
+# which robocasa's setup.py doesn't declare -- robocasa's own README requires installing it
+# separately, master branch) are required just to import openpi.training.config, not only for
+# Groot-format training or eval. Pinned to the exact commits verified working against this repo's
+# other pins (this repo trains against RoboCasa365, i.e. github.com/robocasa/robocasa, not the
+# original RSS'24 RoboCasa).
+robocasa = { git = "https://github.com/robocasa/robocasa", rev = "4f8a2980def75a55dff96b990745b83540425f09" }
+robosuite = { git = "https://github.com/ARISE-Initiative/robosuite", rev = "5ce6643f3092639d08f7b0f90ed1c6a84f50552c" }
 
 [tool.uv.workspace]
 members = ["packages/*"]

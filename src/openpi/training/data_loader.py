@@ -273,6 +273,46 @@ def create_data_loader(
     )
 
 
+def _intervention_sampler(dataset, p_target: float, seed: int) -> torch.utils.data.WeightedRandomSampler:
+    """SIRIUS-style (https://ut-austin-rpl.github.io/sirius/) intervention/robot resampler: builds
+    a WeightedRandomSampler over `dataset`'s `is_intervention` column so each drawn batch is, in
+    expectation, a `p_target`/`1-p_target` mix of intervention/robot frames -- the paper's own
+    derivation shows this importance-sampling resample is equivalent to their weighted-BC loss.
+    Operates on the raw (pre-repack/model-transform) dataset, since TransformedDataset preserves
+    indices 1:1 -- the resulting sampler is valid for the transformed dataset too.
+    """
+    raw = dataset._dataset if isinstance(dataset, TransformedDataset) else dataset  # noqa: SLF001
+    if not hasattr(raw, "hf_dataset"):
+        raise ValueError(
+            "intervention_p_target is set but the resolved dataset has no hf_dataset (not a plain "
+            "LeRobotDataset); this option only applies to LeRobotRobocasaHitlDataConfig."
+        )
+    if "is_intervention" not in raw.hf_dataset.column_names:
+        raise ValueError(
+            "intervention_p_target is set but the dataset has no 'is_intervention' column; "
+            "re-run convert_hitl_hdf5_to_lerobot.py to regenerate it with this feature."
+        )
+    is_intv = np.array([int(x) for x in raw.hf_dataset["is_intervention"]]).reshape(-1)
+    n_total = len(is_intv)
+    n_intv = int(is_intv.sum())
+    n_robot = n_total - n_intv
+    if n_intv == 0 or n_robot == 0:
+        raise ValueError(f"intervention_p_target requires both classes present; got n_intv={n_intv}, n_robot={n_robot}.")
+
+    w_intv = p_target / (n_intv / n_total)
+    w_robot = (1 - p_target) / (n_robot / n_total)
+    weights = np.where(is_intv == 1, w_intv, w_robot)
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return torch.utils.data.WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.double),
+        num_samples=n_total,
+        replacement=True,
+        generator=generator,
+    )
+
+
 def create_torch_data_loader(
     data_config: _config.DataConfig,
     model_config: _model.BaseModelConfig,
@@ -304,6 +344,11 @@ def create_torch_data_loader(
         seed: The seed to use for shuffling the data.
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
+
+    sampler = None
+    if data_config.intervention_p_target is not None:
+        sampler = _intervention_sampler(dataset, data_config.intervention_p_target, seed)
+
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     data_loader = TorchDataLoader(
@@ -311,6 +356,7 @@ def create_torch_data_loader(
         local_batch_size=batch_size // jax.process_count(),
         sharding=sharding,
         shuffle=shuffle,
+        sampler=sampler,
         num_batches=num_batches,
         num_workers=num_workers,
         seed=seed,
@@ -365,6 +411,7 @@ class TorchDataLoader:
         *,
         sharding: jax.sharding.Sharding | None = None,
         shuffle: bool = False,
+        sampler: torch.utils.data.Sampler | None = None,
         num_batches: int | None = None,
         num_workers: int = 0,
         seed: int = 0,
@@ -375,7 +422,10 @@ class TorchDataLoader:
             dataset: The dataset to load.
             local_batch_size: The local batch size for each process.
             sharding: The sharding to use for the data loader.
-            shuffle: Whether to shuffle the data.
+            shuffle: Whether to shuffle the data. Ignored if `sampler` is given (mutually
+                exclusive in torch's DataLoader).
+            sampler: If given, used instead of `shuffle` to draw sample indices (e.g. a
+                WeightedRandomSampler for SIRIUS-style intervention reweighting).
             num_batches: If provided, determines the number of returned batches. If the
                 number is larger than the number of batches in the dataset, the data loader
                 will loop over the dataset. If not provided, will iterate over the dataset
@@ -406,10 +456,11 @@ class TorchDataLoader:
 
         generator = torch.Generator()
         generator.manual_seed(seed)
+        # sampler and shuffle are mutually exclusive in torch's DataLoader.
+        shuffle_or_sampler = {"sampler": sampler} if sampler is not None else {"shuffle": shuffle}
         self._data_loader = torch.utils.data.DataLoader(
             typing.cast(torch.utils.data.Dataset, dataset),
             batch_size=local_batch_size,
-            shuffle=shuffle,
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,
@@ -417,6 +468,7 @@ class TorchDataLoader:
             worker_init_fn=_worker_init_fn,
             drop_last=True,
             generator=generator,
+            **shuffle_or_sampler,
         )
 
     @property

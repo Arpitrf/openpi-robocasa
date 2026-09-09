@@ -108,6 +108,11 @@ class DataConfig:
     data_dirs: list[str] | None = None  # List of data directories for multi-dataset
     dataset_weights: list[float] | None = None  # Weights for each dataset in multi-dataset
 
+    # SIRIUS-style (https://ut-austin-rpl.github.io/sirius/) intervention/robot resampling
+    # target for HITL datasets with an is_intervention column (see LeRobotRobocasaHitlDataConfig).
+    # If None (default), no resampling is applied and training uses standard shuffled sampling.
+    intervention_p_target: float | None = None
+
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -190,13 +195,14 @@ class DataConfigFactory(abc.ABC):
             logging.info(f"Loaded norm stats from {data_assets_dir}")
             return norm_stats
         except FileNotFoundError:
+            # NOTE: this used to fall back to _groot_openpi_dataset._convert_stats_from_repo_meta,
+            # which doesn't exist (confirmed -- AttributeError, not just unimplemented) and was
+            # already marked "# TODO: fix" here in the base commit before any HITL LoRA work
+            # started. Since it could never have succeeded, removing the call is a no-op for any
+            # config that actually needs a working fallback; it just stops this from crashing.
+            # For non-Groot configs like LeRobotRobocasaHitlDataConfig there is no fallback at
+            # all -- run `scripts/compute_norm_stats.py` first, same as before.
             logging.info(f"Norm stats not found in {data_assets_dir}.")
-            # Fallback: try to read and convert stats from repo meta
-            # TODO: fix
-            converted = _groot_openpi_dataset._convert_stats_from_repo_meta(asset_id)
-            if converted is not None:
-                logging.info(f"Converted norm stats from repo meta for {asset_id}")
-                return converted
         return None
 
 
@@ -458,6 +464,55 @@ class LeRobotRobocasaDataConfig(DataConfigFactory):
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotRobocasaHitlDataConfig(DataConfigFactory):
+    """Plain-LeRobot (not Groot) config for datasets written by
+    examples/robocasa/convert_hitl_hdf5_to_lerobot.py, which uses the image/wrist_image/state/
+    actions schema from Arpitrf/semantic_corrections's lerobot_export.py rather than
+    LeRobotRobocasaDataConfig's Groot format. Mirrors LeRobotLiberoDataConfig's repack pattern;
+    no delta-action transform, since RoboCasa's 12-dim action space (EE pos/rot deltas + gripper +
+    base motion + control mode) isn't joint angles and LeRobotRobocasaDataConfig doesn't apply one
+    either.
+    """
+
+    # SIRIUS-style (https://ut-austin-rpl.github.io/sirius/) target fraction of intervention
+    # frames per training batch, via a WeightedRandomSampler over the dataset's is_intervention
+    # column (see data_loader.create_torch_data_loader). 0.5 is the natural 2-class analog of
+    # SIRIUS's own default -- unablated for this dataset, see README_HITL_LORA.md.
+    intervention_p_target: float | None = 0.5
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[robocasa_policy.RobocasaInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[robocasa_policy.RobocasaOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            intervention_p_target=self.intervention_p_target,
+        )
+
+
 @dataclasses.dataclass
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -545,6 +600,16 @@ class TrainConfig:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
+
+# Path to the pi0_robocasa_pretrain_human300 checkpoint downloaded by scripts/download_checkpoint.py
+# (a pi0_base checkpoint already pretrained on the full RoboCasa pretrain_human300 soup). Used
+# below as the LoRA finetuning start point for the CoffeeSetupMug HITL config, instead of generic
+# pi0_base, so it only has to learn the task-specific correction from a handful of demos, not
+# RoboCasa's action space/cameras/embodiment from scratch too.
+_ROBOCASA_PRETRAIN_HUMAN300_PARAMS = os.path.expanduser(
+    "~/.cache/openpi/robocasa/robocasa365_checkpoints/pi0/pi0_robocasa_pretrain_human300/"
+    "multitask_learning/75000/params"
+)
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
@@ -986,6 +1051,41 @@ _CONFIGS = [
         keep_period=10000,
         batch_size=64,
         num_workers=4,
+    ),
+    TrainConfig(
+        # LoRA finetune of pi0_robocasa_pretrain_human300 on 5 pooled HITL CoffeeSetupMug demos.
+        # See README_HITL_LORA.md for the conversion command and norm-stats step.
+        name="pi0_robocasa_coffeesetupmug_hitl_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_all5",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_train_steps=10_000,
+        save_interval=5_000,
+        # checkpoints.py hardcodes max_to_keep=1 (shared across every TrainConfig), which deletes
+        # all but the most recent checkpoint unless a step's number is divisible by keep_period --
+        # with save_interval=5_000/num_train_steps=10_000, saves land at step 5000 and step 9999
+        # (the loop is range(0, num_train_steps), so the last iteration is index 9999, not 10000).
+        # keep_period=5_000 protects the step-5000 checkpoint from that rotation; step 9999
+        # survives anyway as the most recent one.
+        keep_period=5_000,
+        batch_size=8,
+        num_workers=2,
+        # wandb.init()'s entity isn't a TrainConfig field (train.py doesn't pass one) -- set
+        # WANDB_ENTITY=robin-lab in the environment when launching to log there.
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
     ),
 ]
 
