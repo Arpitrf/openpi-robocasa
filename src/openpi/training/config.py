@@ -1071,14 +1071,16 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
         num_train_steps=10_000,
-        save_interval=5_000,
+        save_interval=2_500,
         # checkpoints.py hardcodes max_to_keep=1 (shared across every TrainConfig), which deletes
         # all but the most recent checkpoint unless a step's number is divisible by keep_period --
-        # with save_interval=5_000/num_train_steps=10_000, saves land at step 5000 and step 9999
-        # (the loop is range(0, num_train_steps), so the last iteration is index 9999, not 10000).
-        # keep_period=5_000 protects the step-5000 checkpoint from that rotation; step 9999
-        # survives anyway as the most recent one.
-        keep_period=5_000,
+        # with save_interval=2_500/num_train_steps=10_000, saves land at steps 2500, 5000, 7500,
+        # and 9999 (the loop is range(0, num_train_steps), so the last iteration is index 9999,
+        # not 10000). keep_period=2_500 protects 2500/5000/7500 from that rotation (all divisible
+        # by it); step 9999 survives anyway as the most recent one. Without this matching
+        # save_interval, only the keep_period-divisible steps and the final one would survive --
+        # the rest would get silently deleted as later checkpoints save.
+        keep_period=2_500,
         batch_size=8,
         num_workers=2,
         # wandb.init()'s entity isn't a TrainConfig field (train.py doesn't pass one) -- set
