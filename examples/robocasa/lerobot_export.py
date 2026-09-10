@@ -11,8 +11,12 @@ training dataset). Two changes:
   2. Added an `is_intervention` feature (SIRIUS-style human/robot label -- see
      convert_hitl_hdf5_to_lerobot.py) so training can reweight toward intervention frames; see
      LeRobotRobocasaHitlDataConfig.intervention_p_target in training/config.py.
+  3. lerobot 0.3.x compatibility: `lerobot.common.*` was removed in 0.3.0 (the package is now
+     `lerobot.datasets.*`), and `add_frame` took the task out of the frame dict and made it its
+     own argument. Both are probed at runtime so this works on either generation.
 """
 
+import inspect
 import logging
 import os
 import shutil
@@ -20,9 +24,26 @@ import shutil
 from openpi_client import image_tools
 
 
+def lerobot_dataset_module():
+    """Import lerobot's dataset module across the 0.2.x / 0.3.x package split."""
+    try:
+        import lerobot.datasets.lerobot_dataset as mod  # lerobot >= 0.3.0
+    except ImportError:
+        import lerobot.common.datasets.lerobot_dataset as mod  # lerobot < 0.3.0
+    return mod
+
+
+def _add_frame(dataset, frame, task):
+    """`add_frame` moved the task out of the frame dict into its own arg in lerobot 0.3.0."""
+    if "task" in inspect.signature(dataset.add_frame).parameters:
+        dataset.add_frame(frame, task=task)
+    else:
+        dataset.add_frame({**frame, "task": task})
+
+
 def save_episodes_as_lerobot(episodes, repo_name, lerobot_home=None):
     """Convert a list of EpisodeRecorder objects into a LeRobot dataset."""
-    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+    LeRobotDataset = lerobot_dataset_module().LeRobotDataset
 
     if lerobot_home is None:
         lerobot_home = os.path.expanduser("~/.cache/huggingface/lerobot")
@@ -74,15 +95,16 @@ def save_episodes_as_lerobot(episodes, repo_name, lerobot_home=None):
             img = image_tools.convert_to_uint8(img)
             wrist = image_tools.convert_to_uint8(wrist)
 
-            dataset.add_frame(
+            _add_frame(
+                dataset,
                 {
                     "image": img,
                     "wrist_image": wrist,
                     "state": recorder.states[i],
                     "actions": recorder.actions[i],
                     "is_intervention": recorder.is_intervention[i],
-                    "task": recorder.task_lang,
-                }
+                },
+                task=recorder.task_lang,
             )
         dataset.save_episode()
 

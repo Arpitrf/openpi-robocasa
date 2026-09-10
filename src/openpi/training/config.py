@@ -24,6 +24,7 @@ import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.robocasa_policy as robocasa_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.optimizer as _optimizer
@@ -573,6 +574,22 @@ class TrainConfig:
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 
+    # --- In-training simulator eval (see openpi/training/robocasa_eval.py) ---
+    # Roll the live parameters out in RoboCasa every `eval_interval` steps and log the videos to
+    # this run's wandb page. None disables it. Rollouts are not free -- each is a full simulated
+    # episode -- so a small interval can cost more wall time than the training itself.
+    eval_interval: int | None = None
+    # Rollouts per eval. They all start from the same recorded state, so they differ only by the
+    # policy's sampling noise.
+    eval_rollouts: int = 2
+    # Recorded sim state every eval episode is restored from (an hdf5 written by
+    # semantic_corrections' run_pi0_hitl.py, or an init_states/*_raw.hdf5).
+    eval_init_state: str | None = None
+    eval_env_name: str = "CoffeeSetupMug"
+    # None -> robocasa's task horizon * 1.5, the same budget collection used.
+    eval_horizon: int | None = None
+    eval_replan_steps: int = 5
+
     # If the value is greater than 1, FSDP will be enabled and shard across number of specified devices; overall
     # device memory will be reduced but training could potentially be slower.
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
@@ -610,6 +627,101 @@ _ROBOCASA_PRETRAIN_HUMAN300_PARAMS = os.path.expanduser(
     "~/.cache/openpi/robocasa/robocasa365_checkpoints/pi0/pi0_robocasa_pretrain_human300/"
     "multitask_learning/75000/params"
 )
+
+# Repo-local storage for the HG-DAGGER round configs. The older
+# pi0_robocasa_coffeesetupmug_hitl_lora config hardcodes /mnt/hdd1/sa53925/... , which only
+# existed on the previous (8-GPU) machine; deriving from the source tree keeps rounds working
+# wherever the repo is checked out. Both dirs are gitignored.
+_REPO_ROOT = pathlib.Path(__file__).parents[3]
+
+
+def hgdagger_lora_configs(
+    env_name: str,
+    *,
+    rounds: int = 8,
+    num_train_steps: int = 5_000,
+    save_interval: int = 500,
+    batch_size: int = 8,
+    freeze_vision_tower: bool = False,
+    eval_interval: int | None = 100,
+    eval_rollouts: int = 2,
+    init_state: str = "init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5",
+) -> list["TrainConfig"]:
+    """One LoRA TrainConfig per HG-DAGGER round for `env_name`.
+
+    Round r trains on the *aggregated* demos from rounds 1..r (built by
+    examples/robocasa/convert_hitl_hdf5_to_lerobot.py --round_dirs into repo_id
+    hgdagger_<env>_r{r}), always restarting from the RoboCasa pretrain checkpoint rather than
+    stacking LoRA on the previous round's LoRA -- DAgger re-fits on the grown dataset, and this
+    keeps round r from inheriting round r-1's drift.
+
+    Everything not named here is openpi's LoRA default: rank 16/alpha 16 on the VLM, rank
+    32/alpha 32 on the action expert (attn + ffn), AdamW(b1=0.9, b2=0.95, wd=1e-10, clip=1.0),
+    peak LR 2.5e-5, EMA off.
+
+    `freeze_vision_tower` emits the `_frozenvit` variant of each round instead. openpi's stock
+    LoRA freeze filter covers `.*llm.*` only, so by default the PaliGemma vision tower is *fully*
+    finetuned alongside the LoRA adapters -- 1.74 GiB of trainable fp32 params (plus AdamW
+    moments) against a few thousand frames. The variant additionally freezes `.*img.*`, leaving
+    0.20 GiB trainable: the LLM's LoRA adapters and the state/action projections. Both variants
+    read the same per-round dataset, so a round can be trained each way and compared.
+    """
+    model = pi0.Pi0Config(
+        max_token_len=96,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+    )
+    freeze_filter = model.get_freeze_filter()
+    if freeze_vision_tower:
+        freeze_filter = nnx.Any(freeze_filter, nnx_utils.PathRegex(".*img.*"))
+    suffix = "_frozenvit" if freeze_vision_tower else ""
+    slug = env_name.lower()
+    return [
+        TrainConfig(
+            name=f"pi0_robocasa_{slug}_hgdagger_r{r}{suffix}",
+            model=model,
+            data=LeRobotRobocasaHitlDataConfig(
+                repo_id=f"hgdagger_{slug}_r{r}",
+                base_config=DataConfig(prompt_from_task=True),
+            ),
+            weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+            freeze_filter=freeze_filter,
+            ema_decay=None,  # off for LoRA, as in the other *_low_mem_finetune configs
+            # The default CosineDecaySchedule warms up for 1_000 steps and decays over 30_000 --
+            # at 5_000 steps that would spend a fifth of the run warming up and never finish
+            # decaying (LR would end near peak). Both are scaled to the actual run length here.
+            lr_schedule=_optimizer.CosineDecaySchedule(
+                warmup_steps=200,
+                peak_lr=2.5e-5,
+                decay_steps=num_train_steps,
+                decay_lr=2.5e-6,
+            ),
+            num_train_steps=num_train_steps,
+            # checkpoints.py hardcodes max_to_keep=1 globally, so every saved step except the most
+            # recent is deleted unless step % keep_period == 0. keep_period == save_interval keeps
+            # all of them (1000/2000/3000/4000 by divisibility, 4999 as the most recent -- the
+            # loop is range(0, num_train_steps), so the last index is 4999, not 5000).
+            save_interval=save_interval,
+            keep_period=save_interval,
+            # 32 measured to fit on a single 24GB RTX 4090 at XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+            # (so do 8 and 16); the only configuration that OOMs is disabling XLA preallocation.
+            batch_size=batch_size,
+            num_workers=2,
+            # Simulator rollouts from the round's fixed init state, logged as wandb videos on the
+            # training run's own step axis.
+            eval_interval=eval_interval,
+            eval_rollouts=eval_rollouts,
+            eval_init_state=str(_REPO_ROOT / init_state),
+            eval_env_name=env_name,
+            # wandb entity isn't a TrainConfig field (train.py never passes one) -- launch with
+            # WANDB_ENTITY=robin-lab. Run name comes from --exp-name (hgdagger-rounds-*).
+            project_name="semantic-corrections",
+            assets_base_dir=str(_REPO_ROOT / "assets"),
+            checkpoint_base_dir=str(_REPO_ROOT / "checkpoints"),
+        )
+        for r in range(1, rounds + 1)
+    ]
+
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
@@ -1089,6 +1201,8 @@ _CONFIGS = [
         assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
     ),
+    *hgdagger_lora_configs("CoffeeSetupMug"),
+    *hgdagger_lora_configs("CoffeeSetupMug", freeze_vision_tower=True),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

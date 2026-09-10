@@ -247,6 +247,24 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
+    evaluator = None
+    if config.eval_interval:
+        if not config.eval_init_state:
+            raise ValueError("eval_interval is set but eval_init_state is not")
+        from openpi.training import robocasa_eval
+
+        evaluator = robocasa_eval.RobocasaEvaluator(
+            init_state_hdf5=config.eval_init_state,
+            env_name=config.eval_env_name,
+            model_def=train_state.model_def,
+            # Same transforms + norm stats the data loader uses, so eval observations reach the
+            # model in exactly the training distribution.
+            data_config=config.data.create(config.assets_dirs, config.model),
+            horizon=config.eval_horizon,
+            replan_steps=config.eval_replan_steps,
+            seed=config.seed,
+        )
+
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -272,6 +290,30 @@ def main(config: _config.TrainConfig):
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 
+        if evaluator is not None and (
+            (step % config.eval_interval == 0 and step > start_step) or step == config.num_train_steps - 1
+        ):
+            results = evaluator.rollout(
+                train_state.params,
+                config.checkpoint_dir / "evals" / f"step_{step}",
+                config.eval_rollouts,
+            )
+            successes = sum(r.success for r in results)
+            payload = {
+                "eval/success_rate": successes / len(results),
+                "eval/mean_steps": float(np.mean([r.steps for r in results])),
+            }
+            for i, r in enumerate(results):
+                payload[f"eval_videos/rollout_{i}"] = wandb.Video(
+                    str(r.video_path),
+                    caption=f"step {step} · rollout {i} · {'success' if r.success else 'failure'}",
+                    format="mp4",
+                )
+            wandb.log(payload, step=step)
+            pbar.write(f"Step {step}: eval success {successes}/{len(results)}")
+
+    if evaluator is not None:
+        evaluator.close()
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
 

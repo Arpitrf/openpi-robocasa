@@ -154,8 +154,14 @@ def create_torch_dataset(
         else:
             raise ValueError
 
-    # Standard (openpi) LeRobot dataset loading
-    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+    # Standard (openpi) LeRobot dataset loading.
+    # `lerobot.common.*` was removed in lerobot 0.3.0 (now `lerobot.datasets.*`); probe both so
+    # this works on either generation. `meta.tasks` stays a {task_index: task} dict across the
+    # split, which is what PromptFromLeRobotTask below indexes into.
+    try:
+        import lerobot.datasets.lerobot_dataset as lerobot_dataset  # lerobot >= 0.3.0
+    except ImportError:
+        import lerobot.common.datasets.lerobot_dataset as lerobot_dataset  # lerobot < 0.3.0
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
