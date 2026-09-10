@@ -179,8 +179,30 @@ def stage_convert(args, r: int) -> None:
 
 
 def stage_norm(args, r: int, variant: str) -> None:
+    cfg = config_name(args.env_name, r, variant)
+    if r > 1 and not args.recompute_norm_stats:
+        # Round r>1 warm-starts from round r-1's weights, so it MUST keep round r-1's
+        # normalization: the loaded weights were fit under it, and re-normalizing the same
+        # observations differently is exactly as damaging as feeding the model rescaled inputs.
+        #
+        # Recomputing is also actively unsafe here. RunningStats derives std from
+        # sqrt(E[x^2] - E[x]^2), which loses all precision on near-constant, large-magnitude
+        # dims (e.g. actions[11]: mean -1.0005, std ~1e-3) -- on the round-2 sample several such
+        # dims collapsed to std 0, and Normalize's `std + 1e-6` divisor then turned a 1e-3
+        # deviation into ~1e3, taking step-0 loss from 0.55 to 17430.
+        prev = REPO_ROOT / "assets" / config_name(args.env_name, r - 1, variant) / repo_id(args.env_name, r - 1)
+        dst = REPO_ROOT / "assets" / cfg / repo_id(args.env_name, r)
+        src_file = prev / "norm_stats.json"
+        if not src_file.exists():
+            raise SystemExit(f"round {r} inherits norm stats from {src_file}, which does not exist")
+        print(f"\ncopying norm stats {src_file} -> {dst}/norm_stats.json (warm start keeps round "
+              f"{r - 1}'s normalization; pass --recompute-norm-stats to override)")
+        if not args.dry_run:
+            dst.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst / "norm_stats.json")
+        return
     run(
-        [args.python, "scripts/compute_norm_stats.py", f"--config-name={config_name(args.env_name, r, variant)}"],
+        [args.python, "scripts/compute_norm_stats.py", f"--config-name={cfg}"],
         cwd=REPO_ROOT,
         env={**os.environ, "CUDA_VISIBLE_DEVICES": args.gpu},
         dry_run=args.dry_run,
@@ -258,6 +280,9 @@ def main() -> None:
     # XLA's preallocated arena. Batch 8 fits comfortably at 0.9 (measured).
     p.add_argument("--mem-fraction", default="0.9")
     p.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "robin-lab"))
+    p.add_argument("--recompute-norm-stats", action="store_true",
+                   help="Recompute norm stats for round r>1 instead of inheriting round r-1's. "
+                        "Only correct if that round is NOT warm-starting from r-1's weights.")
     p.add_argument("--overwrite", action="store_true", help="Restart training from scratch instead of --resume")
     p.add_argument("--dry-run", action="store_true", help="Print every command without running it")
     args = p.parse_args()

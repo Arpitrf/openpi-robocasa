@@ -64,6 +64,11 @@ class RobocasaEvaluator:
         video_stride: int = 2,
         video_fps: int = 20,
         seed: int = 7,
+        weld_on_grasp: bool = False,
+        weld_obj_name: str = "obj",
+        weld_eef_body: str | None = None,
+        weld_name: str = "hitl_mug_eef_weld",
+        weld_solref: str = "0.02 1",
     ):
         if str(_EXAMPLES_ROBOCASA) not in sys.path:
             sys.path.insert(0, str(_EXAMPLES_ROBOCASA))
@@ -80,6 +85,13 @@ class RobocasaEvaluator:
         self._seed = seed
         self._env = None
         self._rng = jax.random.key(seed)
+        # Mirrors run_pi0_hitl.py's task.weld_* settings: the demos were collected with the mug
+        # welded to the EEF on grasp, so an eval without it is a physically different task.
+        self._weld_on_grasp = weld_on_grasp
+        self._weld_obj_name = weld_obj_name
+        self._weld_eef_body = weld_eef_body
+        self._weld_name = weld_name
+        self._weld_solref = weld_solref
 
         if data_config.norm_stats is None:
             raise ValueError(
@@ -141,11 +153,46 @@ class RobocasaEvaluator:
         outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), {"state": inputs["state"], "actions": actions})
         return self._output_transform(outputs)["actions"]
 
+    def _maybe_break_weld(self, action) -> None:
+        """Release the weld when the gripper is commanded open (action index 6 <= 0)."""
+        if not self._weld_active:
+            return
+        if float(np.asarray(action).reshape(-1)[6]) > 0:
+            return
+        from mug_weld import break_object_eef_weld
+
+        break_object_eef_weld(self._raw_env, self._weld_name)
+        self._weld_active = False
+
+    def _maybe_apply_weld(self, action) -> bool:
+        """Weld the object to the EEF once a grasp is detected. Returns True if it was applied."""
+        if not self._weld_on_grasp or self._weld_active:
+            return False
+        # Never weld on the same step as an open command -- the joints can still look grasped.
+        if action is not None and float(np.asarray(action).reshape(-1)[6]) <= 0:
+            return False
+        from mug_weld import apply_object_eef_weld
+        from robocasa.utils.object_utils import check_obj_grasped
+
+        if self._weld_obj_name not in self._raw_env.objects:
+            return False
+        if not check_obj_grasped(self._raw_env, self._weld_obj_name):
+            return False
+        apply_object_eef_weld(
+            self._raw_env,
+            object_name=self._weld_obj_name,
+            eef_body=self._weld_eef_body,
+            weld_name=self._weld_name,
+            solref=self._weld_solref,
+        )
+        self._weld_active = True
+        return True
+
     def rollout(self, params, out_dir: pathlib.Path, num_rollouts: int) -> list[RolloutResult]:
         """Roll `params` out `num_rollouts` times from the fixed init state, writing one mp4 each."""
         self._ensure_env()
         import imageio
-        from hitl_env import mark_gym_env_reset
+        from hitl_env import mark_gym_env_reset, refresh_gym_observation
         from hitl_obs import obs_to_camera_frames, obs_to_policy_state
         from openpi_client import image_tools
         from robocasa.utils.env_utils import convert_action
@@ -161,6 +208,9 @@ class RobocasaEvaluator:
             mark_gym_env_reset(self._env)
             obs = self._gym_wrapper.get_observation(self._raw_env._get_observations(force_update=True))
             task_lang = obs["annotation.human.task_description"]
+            # restore_sim_state_from_hdf5 reloads the init state's own MJCF, which carries no
+            # weld, so any weld from the previous rollout is already gone.
+            self._weld_active = False
 
             action_plan = collections.deque()
             frames, done, t = [], False, 0
@@ -181,8 +231,14 @@ class RobocasaEvaluator:
                         },
                     )
                     action_plan.extend(chunk[: self._replan_steps])
-                obs, _, _, _, info = self._env.step(convert_action(action_plan.popleft()))
+                action = action_plan.popleft()
+                obs, _, _, _, info = self._env.step(convert_action(action))
                 done = bool(info.get("success", False))
+                # Same order as run_pi0_hitl.py: release on an open command, then re-weld if the
+                # object is grasped again.
+                self._maybe_break_weld(action)
+                if self._maybe_apply_weld(action):
+                    obs = refresh_gym_observation(self._env, self._raw_env, self._gym_wrapper)
                 if t % self._video_stride == 0 or done:
                     frames.append(image_tools.convert_to_uint8(np.ascontiguousarray(self._env.render())))
                 t += 1

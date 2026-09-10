@@ -262,6 +262,7 @@ def main(config: _config.TrainConfig):
             data_config=config.data.create(config.assets_dirs, config.model),
             horizon=config.eval_horizon,
             replan_steps=config.eval_replan_steps,
+            weld_on_grasp=config.eval_weld_on_grasp,
             seed=config.seed,
         )
 

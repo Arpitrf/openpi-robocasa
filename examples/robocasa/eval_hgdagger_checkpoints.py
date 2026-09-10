@@ -37,7 +37,8 @@ import imageio
 import numpy as np
 import tqdm
 import tyro
-from hitl_env import get_robocasa_gym_wrapper, get_robosuite_env, mark_gym_env_reset
+from hitl_env import get_robocasa_gym_wrapper, get_robosuite_env, mark_gym_env_reset, refresh_gym_observation
+from mug_weld import apply_object_eef_weld, break_object_eef_weld
 from hitl_obs import obs_to_camera_frames, obs_to_policy_state
 from openpi_client import image_tools
 from robocasa.utils.dataset_registry_utils import get_task_horizon
@@ -65,6 +66,13 @@ class Args:
     horizon: int | None = None
     seed: int = 7
     log_to_wandb: bool = True
+    # Match collection's task.weld_on_grasp (configs/hitl/hgdagger_coffee.yaml sets it true):
+    # without the weld this grades the policy under different contact dynamics than it trained on.
+    weld_on_grasp: bool = True
+    weld_obj_name: str = "obj"
+    weld_eef_body: str | None = None
+    weld_name: str = "hitl_mug_eef_weld"
+    weld_solref: str = "0.02 1"
 
 
 def _checkpoint_steps(exp_dir: pathlib.Path) -> list[int]:
@@ -84,6 +92,8 @@ def _rollout(env, raw_env, gym_wrapper, policy, args: Args, horizon: int):
 
     action_plan = collections.deque()
     frames, done, t = [], False, 0
+    # The init state's MJCF carries no weld, so each rollout starts unwelded.
+    weld_active = False
     while t < horizon and not done:
         main_img, wrist_img = obs_to_camera_frames(obs)
         img = image_tools.convert_to_uint8(image_tools.resize_with_pad(main_img, args.resize_size, args.resize_size))
@@ -101,8 +111,28 @@ def _rollout(env, raw_env, gym_wrapper, policy, args: Args, horizon: int):
             assert len(action_chunk) >= args.replan_steps
             action_plan.extend(action_chunk[: args.replan_steps])
 
-        obs, _, _, _, info = env.step(convert_action(action_plan.popleft()))
+        action = action_plan.popleft()
+        obs, _, _, _, info = env.step(convert_action(action))
         done = bool(info.get("success", False))
+
+        # Same order as run_pi0_hitl.py: release on a gripper-open command, then re-weld on grasp.
+        gripper_cmd = float(np.asarray(action).reshape(-1)[6])
+        if weld_active and gripper_cmd <= 0:
+            break_object_eef_weld(raw_env, args.weld_name)
+            weld_active = False
+        elif args.weld_on_grasp and not weld_active and gripper_cmd > 0:
+            from robocasa.utils.object_utils import check_obj_grasped
+
+            if args.weld_obj_name in raw_env.objects and check_obj_grasped(raw_env, args.weld_obj_name):
+                apply_object_eef_weld(
+                    raw_env,
+                    object_name=args.weld_obj_name,
+                    eef_body=args.weld_eef_body,
+                    weld_name=args.weld_name,
+                    solref=args.weld_solref,
+                )
+                weld_active = True
+                obs = refresh_gym_observation(env, raw_env, gym_wrapper)
         if t % 2 == 0 or done:
             frames.append(image_tools.convert_to_uint8(np.ascontiguousarray(env.render())))
         t += 1

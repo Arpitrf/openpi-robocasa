@@ -586,6 +586,10 @@ class TrainConfig:
     # semantic_corrections' run_pi0_hitl.py, or an init_states/*_raw.hdf5).
     eval_init_state: str | None = None
     eval_env_name: str = "CoffeeSetupMug"
+    # Weld the task object to the EEF on grasp during eval rollouts, matching what collection did
+    # (semantic_corrections' task.weld_on_grasp). Must track the collection setting: an eval
+    # without the weld grades the policy on different contact dynamics than it was trained on.
+    eval_weld_on_grasp: bool = False
     # None -> robocasa's task horizon * 1.5, the same budget collection used.
     eval_horizon: int | None = None
     eval_replan_steps: int = 5
@@ -646,6 +650,7 @@ def hgdagger_lora_configs(
     eval_interval: int | None = 100,
     eval_rollouts: int = 2,
     init_state: str = "init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5",
+    warm_start: bool = True,
 ) -> list["TrainConfig"]:
     """One LoRA TrainConfig per HG-DAGGER round for `env_name`.
 
@@ -658,6 +663,13 @@ def hgdagger_lora_configs(
     Everything not named here is openpi's LoRA default: rank 16/alpha 16 on the VLM, rank
     32/alpha 32 on the action expert (attn + ffn), AdamW(b1=0.9, b2=0.95, wd=1e-10, clip=1.0),
     peak LR 2.5e-5, EMA off.
+
+    `warm_start` (default) has round r>1 resume from round r-1's final checkpoint -- adapters and
+    all -- instead of re-LoRA-ing the pretrain checkpoint from scratch. Since each round also
+    trains on the *aggregated* data from rounds 1..r, round 1's demos are effectively revisited
+    each round, and round r inherits whatever round r-1 converged to (textbook DAgger instead
+    re-fits from the same start every round, which cannot inherit drift). Set warm_start=False
+    for that behaviour. Round 1 always starts from the RoboCasa pretrain checkpoint.
 
     `freeze_vision_tower` emits the `_frozenvit` variant of each round instead. openpi's stock
     LoRA freeze filter covers `.*llm.*` only, so by default the PaliGemma vision tower is *fully*
@@ -675,7 +687,24 @@ def hgdagger_lora_configs(
     if freeze_vision_tower:
         freeze_filter = nnx.Any(freeze_filter, nnx_utils.PathRegex(".*img.*"))
     suffix = "_frozenvit" if freeze_vision_tower else ""
+    exp_suffix = "-frozenvit" if freeze_vision_tower else ""
     slug = env_name.lower()
+
+    def _weights_for(r: int) -> weight_loaders.WeightLoader:
+        if r == 1 or not warm_start:
+            return weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS)
+        # The final step of round r-1's run: the loop is range(0, num_train_steps), so the last
+        # index is num_train_steps - 1.
+        prev = (
+            _REPO_ROOT
+            / "checkpoints"
+            / f"pi0_robocasa_{slug}_hgdagger_r{r - 1}{suffix}"
+            / f"hgdagger-rounds-{slug}-r{r - 1}{exp_suffix}"
+            / str(num_train_steps - 1)
+            / "params"
+        )
+        return weight_loaders.CheckpointWeightLoader(str(prev))
+
     return [
         TrainConfig(
             name=f"pi0_robocasa_{slug}_hgdagger_r{r}{suffix}",
@@ -684,7 +713,7 @@ def hgdagger_lora_configs(
                 repo_id=f"hgdagger_{slug}_r{r}",
                 base_config=DataConfig(prompt_from_task=True),
             ),
-            weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+            weight_loader=_weights_for(r),
             freeze_filter=freeze_filter,
             ema_decay=None,  # off for LoRA, as in the other *_low_mem_finetune configs
             # The default CosineDecaySchedule warms up for 1_000 steps and decays over 30_000 --
@@ -713,6 +742,8 @@ def hgdagger_lora_configs(
             eval_rollouts=eval_rollouts,
             eval_init_state=str(_REPO_ROOT / init_state),
             eval_env_name=env_name,
+            # configs/hitl/hgdagger_coffee.yaml collects with weld_on_grasp: true.
+            eval_weld_on_grasp=True,
             # wandb entity isn't a TrainConfig field (train.py never passes one) -- launch with
             # WANDB_ENTITY=robin-lab. Run name comes from --exp-name (hgdagger-rounds-*).
             project_name="semantic-corrections",
