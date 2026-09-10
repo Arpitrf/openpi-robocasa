@@ -54,7 +54,8 @@ python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffee
 ```
 
 One episode per `--raw_dataset_path`, written to `~/.cache/huggingface/lerobot/<repo_name>`
-(override with `--lerobot_home`). 1761 total frames across the 5 demos.
+(override with `--lerobot_home`). 1685 total frames across the 5 demos, 29.1% labeled
+`is_intervention`.
 
 ### SIRIUS-style intervention reweighting
 
@@ -86,8 +87,9 @@ python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffee
     --demo_name demo_0 demo_0 demo_0 demo_0 demo_1
 ```
 
-1794 total frames (33 more than the no-steered variant -- the "steered" frames themselves, no
-longer dropped). `pi0_robocasa_coffeesetupmug_hitl_lora_steered` in `config.py` points at this
+1794 total frames, 33.4% labeled `is_intervention` -- 109 more frames than the no-steered variant
+(1685 above), the raw count of "steered"-labeled frames across the 5 demos that are now kept
+instead of dropped. `pi0_robocasa_coffeesetupmug_hitl_lora_steered` in `config.py` points at this
 repo_id; it's otherwise identical to `pi0_robocasa_coffeesetupmug_hitl_lora` (same LR schedule,
 step count, `preintv_window=10` on both) so a training run on each isolates the effect of
 including "steered" frames, holding everything else fixed.
