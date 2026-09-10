@@ -21,13 +21,16 @@ owns the semantic_corrections pipeline if that field should factor in too.
 SIRIUS-style intervention handling (https://ut-austin-rpl.github.io/sirius/, arXiv:2211.08416):
 each hdf5 has a per-timestep `acting_agent` field (sibling of `actions`, values among
 "human"/"robot"/"steered") marking when a human took over from the autonomous policy. This script
-labels every surviving frame `is_intervention` (True for "human"/"steered") for training-time
-reweighting (see LeRobotRobocasaHitlDataConfig.intervention_p_target in training/config.py and
+labels every surviving frame `is_intervention` (True only for "human" -- SIRIUS's own scheme has
+no analog of "steered" (FRS-style assisted control, distinct from raw human teleop), so those
+frames are dropped entirely rather than folded into either class) for training-time reweighting
+(see LeRobotRobocasaHitlDataConfig.intervention_p_target in training/config.py and
 data_loader.create_torch_data_loader), and drops the `preintv_window` frames immediately preceding
-each robot->intervention transition -- these are the frames judged bad enough to trigger a human
-correction, and SIRIUS's own scheme excludes them from training rather than reproducing them.
-`preintv_window` defaults to 15, carried over verbatim from SIRIUS's own hyperparameter (no
-domain-specific value has been established for this fps=20 setup -- treat as unverified).
+each robot->takeover transition (human OR steered -- both signify the robot was about to need
+help) -- these are the frames judged bad enough to trigger a takeover, and SIRIUS's own scheme
+excludes them from training rather than reproducing them. `preintv_window` defaults to 10,
+carried over from SIRIUS's own ballpark (their hyperparameter is 15; no domain-specific value has
+been established for this fps=20 setup -- treat as unverified either way).
 
 Usage:
     python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffeesetupmug \
@@ -67,7 +70,7 @@ class _HDF5Episode:
     """Minimal EpisodeRecorder stand-in, populated by reading a saved hdf5 instead of a live
     HITL session."""
 
-    def __init__(self, hdf5_path: str, demo_name: str = "demo_0", preintv_window: int = 15):
+    def __init__(self, hdf5_path: str, demo_name: str = "demo_0", preintv_window: int = 10):
         with h5py.File(hdf5_path, "r") as f:
             demo = f["data"][demo_name]
             obs = demo["obs"]
@@ -86,16 +89,21 @@ class _HDF5Episode:
             actions = demo["actions"][:].astype(np.float64)
             self.task_lang = json.loads(demo.attrs["ep_meta"])["lang"]
 
-            is_intv = np.array(
-                [agent.decode() in ("human", "steered") for agent in demo["acting_agent"][:]]
-            )
-            keep = ~_preintv_drop_mask(is_intv, preintv_window)
+            agent = np.array([a.decode() for a in demo["acting_agent"][:]])
+            is_takeover = np.isin(agent, ("human", "steered"))  # any non-autonomous control
+            is_steered = agent == "steered"
+            # preintv triggers on any takeover (human or steered) -- both mean the robot was
+            # about to need help -- but steered frames themselves are dropped like preintv,
+            # not counted as intervention (see module docstring).
+            drop = _preintv_drop_mask(is_takeover, preintv_window) | is_steered
+            keep = ~drop
+            is_human = agent == "human"
 
             self.images = images[keep]
             self.wrist_images = wrist_images[keep]
             self.states = states[keep]
             self.actions = actions[keep]
-            self.is_intervention = is_intv[keep].astype(np.int64).reshape(-1, 1)
+            self.is_intervention = is_human[keep].astype(np.int64).reshape(-1, 1)
 
 
 def main(args):
@@ -131,10 +139,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--preintv_window",
         type=int,
-        default=15,
+        default=10,
         help="Number of robot frames immediately before each human/steered takeover to drop "
-        "(SIRIUS-style preintv). Default of 15 is carried over verbatim from SIRIUS's own "
-        "hyperparameter -- unverified for this domain.",
+        "(SIRIUS-style preintv). Default of 10 is in SIRIUS's own ballpark (their hyperparameter "
+        "is 15) -- unverified for this domain either way.",
     )
     args = parser.parse_args()
     main(args)
