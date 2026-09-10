@@ -1086,16 +1086,17 @@ _CONFIGS = [
             decay_lr=2.5e-6,
         ),
         num_train_steps=20_000,
-        save_interval=500,
         # checkpoints.py hardcodes max_to_keep=1 (shared across every TrainConfig), which deletes
         # all but the most recent checkpoint unless a step's number is divisible by keep_period --
-        # with save_interval=500/num_train_steps=20_000, saves land at steps 500, 1000, ..., 19500,
-        # and 19999 (the loop is range(0, num_train_steps), so the last iteration is index 19999,
-        # not 20000). keep_period=500 protects every 500-multiple from that rotation; step 19999
-        # survives anyway as the most recent one. Without this matching save_interval, only the
-        # keep_period-divisible steps and the final one would survive -- the rest would get
-        # silently deleted as later checkpoints save.
-        keep_period=500,
+        # setting keep_period == save_interval keeps every checkpoint written, with no wasted
+        # write-then-immediately-rotated-away churn. At 20_000 steps, save_interval=500 (matching
+        # the 5_000-step run's cadence) would write all 40 checkpoints (~280GiB for this run alone,
+        # ~560GiB for both A/B variants combined) against only ~330GiB free on /mnt/hdd1.
+        # save_interval=2500 instead writes 8 checkpoints (2500, 5000, ..., 17500, plus the final
+        # step 19999, which is always saved and kept regardless) -- same cadence as the original
+        # sirius_lora_v1 run, ~56GiB for this run / ~112GiB for both variants.
+        save_interval=2_500,
+        keep_period=2_500,
         batch_size=8,
         num_workers=2,
         # wandb.init()'s entity isn't a TrainConfig field (train.py doesn't pass one) -- set
@@ -1132,8 +1133,8 @@ _CONFIGS = [
             decay_lr=2.5e-6,
         ),
         num_train_steps=20_000,
-        save_interval=500,
-        keep_period=500,
+        save_interval=2_500,  # see pi0_robocasa_coffeesetupmug_hitl_lora's comment -- disk budget
+        keep_period=2_500,
         batch_size=8,
         num_workers=2,
         project_name="semantic-corrections",

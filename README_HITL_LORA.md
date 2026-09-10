@@ -132,15 +132,17 @@ CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 WANDB_ENTITY=robin
     python scripts/train.py pi0_robocasa_coffeesetupmug_hitl_lora_steered --exp-name=<exp_name> --overwrite
 ```
 
-`num_train_steps=20_000`, `save_interval=500` -- checkpoints land every 500 steps, at 500, 1000,
-..., 19500, and 19999 (the training loop is `range(0, num_train_steps)`, so the last iteration is
-index 19999, not 20000). `keep_period=500` matters here: `checkpoints.py` hardcodes
-`max_to_keep=1` globally (every TrainConfig), which deletes all but the most recent checkpoint
-unless a step's number is divisible by `keep_period` -- without this, every checkpoint but the
-last would get silently deleted as training progresses. `lr_schedule` (`warmup_steps=800,
-decay_steps=20_000`) is rescaled from `skand/coffeesetupmug-dagger-rounds`'s `hgdagger_lora_configs`
-(tuned for a 5_000-step run) to match this run length, keeping the same warmup:decay ratio. Use
-`--resume` instead of `--overwrite` to continue an existing run.
+`num_train_steps=20_000`, `save_interval=2_500` -- checkpoints land at 2500, 5000, ..., 17500, and
+19999 (the training loop is `range(0, num_train_steps)`, so the last iteration is index 19999, not
+20000, and it's always saved as the most recent checkpoint regardless of `save_interval`) -- 8
+checkpoints, same cadence as the original `sirius_lora_v1` run. `keep_period=2_500` (matching
+`save_interval`) matters here: `checkpoints.py` hardcodes `max_to_keep=1` globally (every
+TrainConfig), which deletes all but the most recent checkpoint unless a step's number is divisible
+by `keep_period` -- without this, every checkpoint but the last would get silently deleted as
+training progresses. `lr_schedule` (`warmup_steps=800, decay_steps=20_000`) is rescaled from
+`skand/coffeesetupmug-dagger-rounds`'s `hgdagger_lora_configs` (tuned for a 5_000-step run) to
+match this run length, keeping the same warmup:decay ratio. Use `--resume` instead of `--overwrite`
+to continue an existing run.
 
 ## 5. Eval on a fixed scene
 
