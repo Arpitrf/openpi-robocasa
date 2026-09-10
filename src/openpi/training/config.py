@@ -1070,6 +1070,16 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         ema_decay=None,
+        # The default CosineDecaySchedule warms up for 1_000 steps and decays over 30_000 -- at
+        # 5_000 steps that would spend a fifth of the run warming up and never finish decaying
+        # (LR would end near peak). Rescaled to the actual run length, matching
+        # skand/coffeesetupmug-dagger-rounds's hgdagger_lora_configs.
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200,
+            peak_lr=2.5e-5,
+            decay_steps=5_000,
+            decay_lr=2.5e-6,
+        ),
         num_train_steps=5_000,
         save_interval=500,
         # checkpoints.py hardcodes max_to_keep=1 (shared across every TrainConfig), which deletes
