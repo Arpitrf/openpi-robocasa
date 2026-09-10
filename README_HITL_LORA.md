@@ -54,25 +54,43 @@ python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffee
 ```
 
 One episode per `--raw_dataset_path`, written to `~/.cache/huggingface/lerobot/<repo_name>`
-(override with `--lerobot_home`). Verified end-to-end: 1761 total frames across the 5 demos.
+(override with `--lerobot_home`). 1761 total frames across the 5 demos.
 
 ### SIRIUS-style intervention reweighting
 
 Each hdf5's per-timestep `acting_agent` field (`"human"`/`"robot"`/`"steered"`) marks when a human
 took over from the autonomous policy. Adapted from SIRIUS
 ([ut-austin-rpl.github.io/sirius](https://ut-austin-rpl.github.io/sirius/), arXiv:2211.08416):
-the conversion script drops the `--preintv_window` frames (default 15, carried over verbatim from
-SIRIUS's own hyperparameter -- unverified for this domain) immediately preceding each
-robot->intervention handoff (the frames judged bad enough to trigger a correction, excluded rather
-than trained on), and labels every surviving frame `is_intervention` (`"human"`/`"steered"` -> 1,
-`"robot"` -> 0). At train time, `LeRobotRobocasaHitlDataConfig.intervention_p_target` (default
+the conversion script drops the `--preintv_window` frames (default 10, in SIRIUS's own ballpark --
+their hyperparameter is 15, unverified for this domain either way) immediately preceding each
+robot->takeover transition (the frames judged bad enough to trigger a takeover, excluded rather
+than trained on). At train time, `LeRobotRobocasaHitlDataConfig.intervention_p_target` (default
 `0.5`) builds a `WeightedRandomSampler` (`data_loader._intervention_sampler`) so each batch is, in
-expectation, a 50/50 mix of intervention/robot frames regardless of the natural ratio (measured:
-34% intervention / 66% robot, pooled across all 5 demos). This repo has no separate
-human-demonstration class, so unlike SIRIUS's own 4-class scheme (`demo`, `robot`, `intv`,
-`preintv`) this is a 2-class adaptation -- the exact `P(demo)=0` limit of SIRIUS's own formula, not
-an approximation of it. `ℓ=15` and `p_target=0.5` are both unablated for this dataset. Set
-`intervention_p_target=None` on the data config to disable and fall back to plain shuffling.
+expectation, a 50/50 mix of intervention/robot frames regardless of the natural ratio. This repo
+has no separate human-demonstration class, so unlike SIRIUS's own 4-class scheme (`demo`, `robot`,
+`intv`, `preintv`) this is a 2-class adaptation -- the exact `P(demo)=0` limit of SIRIUS's own
+formula, not an approximation of it. Set `intervention_p_target=None` on the data config to
+disable and fall back to plain shuffling.
+
+**"steered" frames -- two dataset variants for an A/B comparison.** Besides `"human"`/`"robot"`,
+`acting_agent` can be `"steered"` (FRS-style assisted control, distinct from raw human teleop).
+By default (`hitl_coffeesetupmug_all5` above) these are dropped entirely and `is_intervention` is
+`True` only for `"human"` -- SIRIUS's own scheme has no analog of "steered". Passing
+`--include_steered` instead keeps them and folds them into `is_intervention` alongside `"human"`
+(the original, pre-ablation behavior), producing a second dataset:
+
+```bash
+python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffeesetupmug_all5_steered \
+    --include_steered \
+    --raw_dataset_path <same 5 paths as above> \
+    --demo_name demo_0 demo_0 demo_0 demo_0 demo_1
+```
+
+1794 total frames (33 more than the no-steered variant -- the "steered" frames themselves, no
+longer dropped). `pi0_robocasa_coffeesetupmug_hitl_lora_steered` in `config.py` points at this
+repo_id; it's otherwise identical to `pi0_robocasa_coffeesetupmug_hitl_lora` (same LR schedule,
+step count, `preintv_window=10` on both) so a training run on each isolates the effect of
+including "steered" frames, holding everything else fixed.
 
 ## 2. Download the RoboCasa-pretrained starting checkpoint
 
@@ -90,27 +108,39 @@ machine.
 
 ## 3. Compute norm stats
 
-`pi0_robocasa_coffeesetupmug_hitl_lora`'s `repo_id`-based data config has no automatic norm-stats
-fallback, unlike the `data_dirs`-based configs used elsewhere in this repo for the large RoboCasa
-soups -- compute them once per dataset:
+Neither config's `repo_id`-based data config has an automatic norm-stats fallback, unlike the
+`data_dirs`-based configs used elsewhere in this repo for the large RoboCasa soups -- compute them
+once per dataset (each `config-name` below reads its own `repo_id`):
 
 ```bash
 CUDA_VISIBLE_DEVICES=<idx> python scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora
+CUDA_VISIBLE_DEVICES=<idx> python scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora_steered
 ```
 
 ## 4. Train
 
+`pi0_robocasa_coffeesetupmug_hitl_lora` (steered frames dropped) and
+`pi0_robocasa_coffeesetupmug_hitl_lora_steered` (steered frames kept, see step 1) are otherwise
+identical -- same LR schedule and step count -- so running both isolates the effect of that one
+difference:
+
 ```bash
 CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 WANDB_ENTITY=robin-lab \
     python scripts/train.py pi0_robocasa_coffeesetupmug_hitl_lora --exp-name=<exp_name> --overwrite
+
+CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 WANDB_ENTITY=robin-lab \
+    python scripts/train.py pi0_robocasa_coffeesetupmug_hitl_lora_steered --exp-name=<exp_name> --overwrite
 ```
 
-`num_train_steps=10_000`, `save_interval=5_000` -- checkpoints land at step 5000 and step 9999
-(the training loop is `range(0, num_train_steps)`, so the last iteration is index 9999, not
-10000). `keep_period=5_000` matters here: `checkpoints.py` hardcodes `max_to_keep=1` globally
-(every TrainConfig), which deletes all but the most recent checkpoint unless a step's number is
-divisible by `keep_period` -- without this, the step-5000 checkpoint would get silently deleted
-once step 9999 saves. Use `--resume` instead of `--overwrite` to continue an existing run.
+`num_train_steps=20_000`, `save_interval=500` -- checkpoints land every 500 steps, at 500, 1000,
+..., 19500, and 19999 (the training loop is `range(0, num_train_steps)`, so the last iteration is
+index 19999, not 20000). `keep_period=500` matters here: `checkpoints.py` hardcodes
+`max_to_keep=1` globally (every TrainConfig), which deletes all but the most recent checkpoint
+unless a step's number is divisible by `keep_period` -- without this, every checkpoint but the
+last would get silently deleted as training progresses. `lr_schedule` (`warmup_steps=800,
+decay_steps=20_000`) is rescaled from `skand/coffeesetupmug-dagger-rounds`'s `hgdagger_lora_configs`
+(tuned for a 5_000-step run) to match this run length, keeping the same warmup:decay ratio. Use
+`--resume` instead of `--overwrite` to continue an existing run.
 
 ## 5. Eval on a fixed scene
 

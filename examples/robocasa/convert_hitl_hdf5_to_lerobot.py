@@ -21,16 +21,19 @@ owns the semantic_corrections pipeline if that field should factor in too.
 SIRIUS-style intervention handling (https://ut-austin-rpl.github.io/sirius/, arXiv:2211.08416):
 each hdf5 has a per-timestep `acting_agent` field (sibling of `actions`, values among
 "human"/"robot"/"steered") marking when a human took over from the autonomous policy. This script
-labels every surviving frame `is_intervention` (True only for "human" -- SIRIUS's own scheme has
-no analog of "steered" (FRS-style assisted control, distinct from raw human teleop), so those
-frames are dropped entirely rather than folded into either class) for training-time reweighting
-(see LeRobotRobocasaHitlDataConfig.intervention_p_target in training/config.py and
-data_loader.create_torch_data_loader), and drops the `preintv_window` frames immediately preceding
-each robot->takeover transition (human OR steered -- both signify the robot was about to need
-help) -- these are the frames judged bad enough to trigger a takeover, and SIRIUS's own scheme
-excludes them from training rather than reproducing them. `preintv_window` defaults to 10,
-carried over from SIRIUS's own ballpark (their hyperparameter is 15; no domain-specific value has
-been established for this fps=20 setup -- treat as unverified either way).
+drops the `preintv_window` frames immediately preceding each robot->takeover transition (human OR
+steered -- both signify the robot was about to need help) -- these are the frames judged bad
+enough to trigger a takeover, and SIRIUS's own scheme excludes them from training rather than
+reproducing them. `preintv_window` defaults to 10, carried over from SIRIUS's own ballpark (their
+hyperparameter is 15; no domain-specific value has been established for this fps=20 setup -- treat
+as unverified either way).
+
+`--include_steered` controls how "steered" frames (FRS-style assisted control, distinct from raw
+human teleop) are handled, independent of `preintv_window`: by default (False) they're dropped
+entirely and `is_intervention` is True only for "human" -- SIRIUS's own scheme has no analog of
+"steered", so this is the closer adaptation. Pass `--include_steered` to instead keep them and
+fold them into `is_intervention` alongside "human" (the original, pre-ablation behavior) for an
+A/B comparison of whether dropping them mattered.
 
 Usage:
     python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffeesetupmug \
@@ -70,7 +73,13 @@ class _HDF5Episode:
     """Minimal EpisodeRecorder stand-in, populated by reading a saved hdf5 instead of a live
     HITL session."""
 
-    def __init__(self, hdf5_path: str, demo_name: str = "demo_0", preintv_window: int = 10):
+    def __init__(
+        self,
+        hdf5_path: str,
+        demo_name: str = "demo_0",
+        preintv_window: int = 10,
+        include_steered: bool = False,
+    ):
         with h5py.File(hdf5_path, "r") as f:
             demo = f["data"][demo_name]
             obs = demo["obs"]
@@ -92,18 +101,24 @@ class _HDF5Episode:
             agent = np.array([a.decode() for a in demo["acting_agent"][:]])
             is_takeover = np.isin(agent, ("human", "steered"))  # any non-autonomous control
             is_steered = agent == "steered"
-            # preintv triggers on any takeover (human or steered) -- both mean the robot was
-            # about to need help -- but steered frames themselves are dropped like preintv,
-            # not counted as intervention (see module docstring).
-            drop = _preintv_drop_mask(is_takeover, preintv_window) | is_steered
+            preintv_drop = _preintv_drop_mask(is_takeover, preintv_window)
+            if include_steered:
+                # Original (pre-ablation) behavior: steered frames are kept and counted as
+                # intervention alongside human, like SIRIUS's own "human"/"steered" pooling.
+                drop = preintv_drop
+                is_intervention = is_takeover
+            else:
+                # Steered frames dropped entirely like preintv (see module docstring);
+                # is_intervention is human-only.
+                drop = preintv_drop | is_steered
+                is_intervention = agent == "human"
             keep = ~drop
-            is_human = agent == "human"
 
             self.images = images[keep]
             self.wrist_images = wrist_images[keep]
             self.states = states[keep]
             self.actions = actions[keep]
-            self.is_intervention = is_human[keep].astype(np.int64).reshape(-1, 1)
+            self.is_intervention = is_intervention[keep].astype(np.int64).reshape(-1, 1)
 
 
 def main(args):
@@ -117,7 +132,12 @@ def main(args):
             f"({len(args.raw_dataset_path)} paths, got {len(args.demo_name)} demo_name values)"
         )
     episodes = [
-        _HDF5Episode(path, demo_name=name, preintv_window=args.preintv_window)
+        _HDF5Episode(
+            path,
+            demo_name=name,
+            preintv_window=args.preintv_window,
+            include_steered=args.include_steered,
+        )
         for path, name in zip(args.raw_dataset_path, demo_names, strict=True)
     ]
     save_episodes_as_lerobot(episodes, args.repo_name, lerobot_home=args.lerobot_home)
@@ -143,6 +163,13 @@ if __name__ == "__main__":
         help="Number of robot frames immediately before each human/steered takeover to drop "
         "(SIRIUS-style preintv). Default of 10 is in SIRIUS's own ballpark (their hyperparameter "
         "is 15) -- unverified for this domain either way.",
+    )
+    parser.add_argument(
+        "--include_steered",
+        action="store_true",
+        help="Keep 'steered' frames and count them as is_intervention alongside 'human', instead "
+        "of dropping them entirely (the default). For an A/B comparison against the no-steered "
+        "ablation.",
     )
     args = parser.parse_args()
     main(args)

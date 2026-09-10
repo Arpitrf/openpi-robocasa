@@ -1054,7 +1054,10 @@ _CONFIGS = [
     ),
     TrainConfig(
         # LoRA finetune of pi0_robocasa_pretrain_human300 on 5 pooled HITL CoffeeSetupMug demos.
-        # See README_HITL_LORA.md for the conversion command and norm-stats step.
+        # See README_HITL_LORA.md for the conversion command and norm-stats step. "steered" frames
+        # are dropped entirely and is_intervention is human-only (see convert_hitl_hdf5_to_lerobot.py
+        # --include_steered) -- for the A/B sibling that keeps them, see
+        # pi0_robocasa_coffeesetupmug_hitl_lora_steered below.
         name="pi0_robocasa_coffeesetupmug_hitl_lora",
         model=pi0.Pi0Config(
             max_token_len=96,
@@ -1071,22 +1074,24 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
         # The default CosineDecaySchedule warms up for 1_000 steps and decays over 30_000 -- at
-        # 5_000 steps that would spend a fifth of the run warming up and never finish decaying
-        # (LR would end near peak). Rescaled to the actual run length, matching
-        # skand/coffeesetupmug-dagger-rounds's hgdagger_lora_configs.
+        # 20_000 steps that would spend most of the run warming up and never finish decaying (LR
+        # would end near peak). Rescaled to the actual run length, keeping the same
+        # warmup:decay ratio as skand/coffeesetupmug-dagger-rounds's hgdagger_lora_configs (which
+        # was itself tuned for a 5_000-step run: warmup_steps=200, decay_steps=5_000) scaled 4x for
+        # this 20_000-step run.
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=200,
+            warmup_steps=800,
             peak_lr=2.5e-5,
-            decay_steps=5_000,
+            decay_steps=20_000,
             decay_lr=2.5e-6,
         ),
-        num_train_steps=5_000,
+        num_train_steps=20_000,
         save_interval=500,
         # checkpoints.py hardcodes max_to_keep=1 (shared across every TrainConfig), which deletes
         # all but the most recent checkpoint unless a step's number is divisible by keep_period --
-        # with save_interval=500/num_train_steps=5_000, saves land at steps 500, 1000, ..., 4500,
-        # and 4999 (the loop is range(0, num_train_steps), so the last iteration is index 4999,
-        # not 5000). keep_period=500 protects every 500-multiple from that rotation; step 4999
+        # with save_interval=500/num_train_steps=20_000, saves land at steps 500, 1000, ..., 19500,
+        # and 19999 (the loop is range(0, num_train_steps), so the last iteration is index 19999,
+        # not 20000). keep_period=500 protects every 500-multiple from that rotation; step 19999
         # survives anyway as the most recent one. Without this matching save_interval, only the
         # keep_period-divisible steps and the final one would survive -- the rest would get
         # silently deleted as later checkpoints save.
@@ -1095,6 +1100,42 @@ _CONFIGS = [
         num_workers=2,
         # wandb.init()'s entity isn't a TrainConfig field (train.py doesn't pass one) -- set
         # WANDB_ENTITY=robin-lab in the environment when launching to log there.
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
+        # A/B sibling of pi0_robocasa_coffeesetupmug_hitl_lora: identical in every respect except
+        # the dataset -- built with convert_hitl_hdf5_to_lerobot.py --include_steered, so "steered"
+        # frames are kept and counted as is_intervention alongside "human" instead of being
+        # dropped entirely. Requested by Arpit to see whether dropping steered frames actually
+        # mattered, holding everything else (LR schedule, step count, preintv_window=10) fixed.
+        name="pi0_robocasa_coffeesetupmug_hitl_lora_steered",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_all5_steered",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=500,
+        keep_period=500,
+        batch_size=8,
+        num_workers=2,
         project_name="semantic-corrections",
         assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
