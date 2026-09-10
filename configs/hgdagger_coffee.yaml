@@ -1,0 +1,51 @@
+# HG-DAGGER round collection: CoffeeSetupMug, one fixed initial state, N intervened demos.
+#
+# Every episode is restored from the same recorded sim state (bootstrap.load_state_hdf5), so
+# scene layout/style and object placement are identical round to round -- the only variation is
+# pi0's sampling noise and the human's corrections. `scene.layout_and_style_ids` below just
+# matches the init state's own ep_meta (layout 43 / style 19) so the pre-restore reset builds the
+# same kitchen; restore_sim_state() rebuilds from the file's MJCF regardless.
+#
+# The round loop (openpi-robocasa/scripts/hgdagger_round.py) passes --run.output-dir and
+# --run.demo-start-idx; run it standalone with those flags to collect a round by hand.
+defaults:
+  - base
+  - tasks/coffee
+  - object_pose/fixed
+
+task:
+  # Weld the mug to the EEF once a grasp is detected (broken again by a gripper-open command),
+  # inherited from tasks/coffee.yaml. Kept ON so SpaceMouse corrections don't lose the mug
+  # mid-intervention. Consequence to keep in mind: eval runs with no weld, so a marginal grasp
+  # that the weld held together during collection can still fail at rollout -- turn this on or
+  # off for ALL rounds, never some, or the dataset stops being internally consistent.
+  weld_on_grasp: true
+
+scene:
+  layout_and_style_ids:
+    - [43, 19]
+
+run:
+  num_episodes: 10
+  # An episode counts toward num_episodes only if it BOTH completed the task and contained a
+  # human takeover. Timeouts, failures, and episodes discarded with S are re-run instead.
+  require_intervention: true
+  require_success: true
+  # Set by the round loop: <expdata>/hgdagger/CoffeeSetupMug/round_<r>
+  output_dir: null
+  demo_start_idx: 0
+
+hitl:
+  use_hitl: true
+
+cameras:
+  # Depth/calib are for the keypoint pipeline; BC finetuning never reads them (~2x smaller hdf5).
+  record_depth: false
+  register_custom_camera: false
+  show_viewer: false
+
+bootstrap:
+  load_state_hdf5: /home/skand/Documents/robocasa-code/openpi-robocasa/init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5
+  load_state_frame_mode: fixed
+  load_state_frame: 0
+  load_state_demo_name: demo_0
