@@ -12,6 +12,16 @@ policy out from there. Unlike the reset_to() this script used to hand-roll, this
 `ctrl` and `gripper_actions`, which matters if `--args.frame` points mid-episode (e.g. a
 post-grasp state) rather than frame 0.
 
+Weld-on-grasp (`--args.weld_on_grasp`, default True): `semantic_corrections`'s own
+`configs/tasks/coffee.yaml` sets `weld_on_grasp: true` for CoffeeSetupMug, and `run_pi0_hitl.py`
+applies it -- once the gripper grasps the target object, a rigid MuJoCo weld couples it to the
+EEF so it can't slip/rotate independently of the gripper. The training demos were recorded with
+this on; this script previously had no equivalent at all, so evaluated rollouts let the object
+move freely after grasp in a way the policy never saw during training. Ported from
+`mug_weld.py`, replicating `run_pi0_hitl.py`'s `_maybe_apply_grasp_weld`/
+`_maybe_break_weld_on_gripper_open` trigger logic exactly (weld on grasp detection, unless this
+step's action is a gripper-open command; break the weld when an open command is issued).
+
 Verified: state restore reproduces the recorded scene's first frame pixel-for-pixel (compared
 against `obs/robot0_agentview_left_image[0]` straight out of the hdf5, not just against this
 script's own rendering), and `reset_from_xml_string` correctly re-derives task fixture references
@@ -45,13 +55,14 @@ import imageio
 import numpy as np
 import tqdm
 import tyro
-from hitl_env import get_robosuite_env, get_robocasa_gym_wrapper, mark_gym_env_reset
+from hitl_env import get_robosuite_env, get_robocasa_gym_wrapper, mark_gym_env_reset, refresh_gym_observation
 from hitl_obs import obs_to_camera_frames, obs_to_policy_state
+from mug_weld import apply_object_eef_weld, break_object_eef_weld
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from robocasa.utils.dataset_registry_utils import get_task_horizon
 from robocasa.utils.env_utils import convert_action
-from sim_state import restore_sim_state_from_hdf5
+from sim_state import object_is_grasped, restore_sim_state_from_hdf5
 
 
 @dataclasses.dataclass
@@ -69,6 +80,13 @@ class Args:
     trials_per_scene: int = 5
     log_dir: str = None
     seed: int = 7
+
+    # Weld the grasped object rigidly to the EEF, matching how the training demos were recorded
+    # (semantic_corrections's configs/tasks/coffee.yaml sets weld_on_grasp=true for this task).
+    weld_on_grasp: bool = True
+    weld_obj_name: str = "obj"
+    weld_name: str = "eval_obj_eef_weld"
+    weld_solref: str = "0.02 1"
 
 
 def eval_main(args: Args) -> None:
@@ -103,6 +121,7 @@ def eval_main(args: Args) -> None:
             t = 0
             replay_images = []
             done = False
+            weld_active = False
             logging.info(f"[{scene_name}] Starting episode {episode_idx + 1}...")
             while t < horizon:
                 main_img, wrist_img = obs_to_camera_frames(obs)
@@ -123,14 +142,37 @@ def eval_main(args: Args) -> None:
                     assert len(action_chunk) >= args.replan_steps
                     action_plan.extend(action_chunk[: args.replan_steps])
 
-                action = action_plan.popleft()
-                action = convert_action(action)
+                raw_action = action_plan.popleft()
+                action = convert_action(raw_action)
                 obs, reward, done, truncated, info = env.step(action)
                 done = info["success"]
                 replay_img = np.ascontiguousarray(env.render())
                 replay_img = image_tools.convert_to_uint8(replay_img)
                 if t % 2 == 0 or t == horizon - 1 or done:
                     replay_images.append(replay_img)
+
+                if args.weld_on_grasp:
+                    # Action layout: index 6 is gripper; >0 = closed, <=0 = open. Mirrors
+                    # run_pi0_hitl.py's _maybe_break_weld_on_gripper_open/_maybe_apply_grasp_weld.
+                    gripper_cmd = float(np.asarray(raw_action).reshape(-1)[6])
+                    if weld_active and gripper_cmd <= 0:
+                        break_object_eef_weld(raw_env, args.weld_name)
+                        weld_active = False
+                    elif (
+                        not weld_active
+                        and gripper_cmd > 0
+                        and args.weld_obj_name in raw_env.objects
+                        and object_is_grasped(raw_env, args.weld_obj_name)
+                    ):
+                        apply_object_eef_weld(
+                            raw_env,
+                            object_name=args.weld_obj_name,
+                            weld_name=args.weld_name,
+                            solref=args.weld_solref,
+                        )
+                        weld_active = True
+                        obs = refresh_gym_observation(env, raw_env, gym_wrapper)
+
                 if done:
                     total_successes += 1
                     break
