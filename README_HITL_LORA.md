@@ -94,6 +94,25 @@ repo_id; it's otherwise identical to `pi0_robocasa_coffeesetupmug_hitl_lora` (sa
 step count, `preintv_window=10` on both) so a training run on each isolates the effect of
 including "steered" frames, holding everything else fixed.
 
+**"robot_only" -- a third variant with corrections removed entirely.** To measure how much the
+human/steered correction frames are helping at all (as opposed to just having more autonomous
+rollout to imitate), `--robot_only` keeps only `acting_agent == "robot"` frames and drops every
+"human"/"steered" frame outright -- no `preintv_window` trimming (nothing to protect a transition
+into, since no intervention frames survive) and `is_intervention` all-zero:
+
+```bash
+python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffeesetupmug_all5_robotonly \
+    --robot_only \
+    --raw_dataset_path <same 5 paths as above> \
+    --demo_name demo_0 demo_0 demo_0 demo_0 demo_1
+```
+
+1265 total frames (vs. 1685/1794 above). `pi0_robocasa_coffeesetupmug_hitl_lora_robotonly` in
+`config.py` points at this repo_id, with `intervention_p_target=None` (data_loader's
+`WeightedRandomSampler` requires both classes present and raises otherwise) -- plain shuffling
+instead of the 50/50 SIRIUS resampling the other two configs use. Same LR schedule/step count as
+the other two, so comparing eval results across all three isolates the corrections' contribution.
+
 ## 2. Download the RoboCasa-pretrained starting checkpoint
 
 ```bash
@@ -117,6 +136,7 @@ once per dataset (each `config-name` below reads its own `repo_id`):
 ```bash
 CUDA_VISIBLE_DEVICES=<idx> python scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora
 CUDA_VISIBLE_DEVICES=<idx> python scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora_steered
+CUDA_VISIBLE_DEVICES=<idx> python scripts/compute_norm_stats.py --config-name=pi0_robocasa_coffeesetupmug_hitl_lora_robotonly
 ```
 
 ## 4. Train
@@ -132,6 +152,9 @@ CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 WANDB_ENTITY=robin
 
 CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 WANDB_ENTITY=robin-lab \
     python scripts/train.py pi0_robocasa_coffeesetupmug_hitl_lora_steered --exp-name=<exp_name> --overwrite
+
+CUDA_VISIBLE_DEVICES=<idx> XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 WANDB_ENTITY=robin-lab \
+    python scripts/train.py pi0_robocasa_coffeesetupmug_hitl_lora_robotonly --exp-name=<exp_name> --overwrite
 ```
 
 `num_train_steps=20_000`, `save_interval=2_500` -- checkpoints land at 2500, 5000, ..., 17500, and

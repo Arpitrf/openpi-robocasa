@@ -35,6 +35,14 @@ entirely and `is_intervention` is True only for "human" -- SIRIUS's own scheme h
 fold them into `is_intervention` alongside "human" (the original, pre-ablation behavior) for an
 A/B comparison of whether dropping them mattered.
 
+`--robot_only` is a third, mutually-exclusive mode for isolating the effect of corrections
+entirely: it keeps only frames where `acting_agent == "robot"` and drops every "human" and
+"steered" frame outright, with no `preintv_window` trimming (that trimming exists to keep
+robot->takeover transitions clean when intervention frames are trained on right alongside them;
+with zero intervention frames in the output there's no transition to protect). `is_intervention`
+is all-zero, so pair this with `intervention_p_target=None` on the data config -- the
+`WeightedRandomSampler` in data_loader.py requires both classes present and raises otherwise.
+
 Usage:
     python examples/robocasa/convert_hitl_hdf5_to_lerobot.py --repo_name hitl_coffeesetupmug \
         --raw_dataset_path data/CoffeeSetupMug/2026-06-30-22-00/demo_0.hdf5 \
@@ -79,6 +87,7 @@ class _HDF5Episode:
         demo_name: str = "demo_0",
         preintv_window: int = 10,
         include_steered: bool = False,
+        robot_only: bool = False,
     ):
         with h5py.File(hdf5_path, "r") as f:
             demo = f["data"][demo_name]
@@ -99,20 +108,28 @@ class _HDF5Episode:
             self.task_lang = json.loads(demo.attrs["ep_meta"])["lang"]
 
             agent = np.array([a.decode() for a in demo["acting_agent"][:]])
-            is_takeover = np.isin(agent, ("human", "steered"))  # any non-autonomous control
-            is_steered = agent == "steered"
-            preintv_drop = _preintv_drop_mask(is_takeover, preintv_window)
-            if include_steered:
-                # Original (pre-ablation) behavior: steered frames are kept and counted as
-                # intervention alongside human, like SIRIUS's own "human"/"steered" pooling.
-                drop = preintv_drop
-                is_intervention = is_takeover
+            if robot_only:
+                # No-corrections ablation: keep only autonomous-policy frames, drop every
+                # human/steered frame outright. No preintv trimming (nothing to protect a
+                # transition into, since no intervention frames survive) and no intervention
+                # frames left to label.
+                keep = agent == "robot"
+                is_intervention = np.zeros(len(agent), dtype=bool)
             else:
-                # Steered frames dropped entirely like preintv (see module docstring);
-                # is_intervention is human-only.
-                drop = preintv_drop | is_steered
-                is_intervention = agent == "human"
-            keep = ~drop
+                is_takeover = np.isin(agent, ("human", "steered"))  # any non-autonomous control
+                is_steered = agent == "steered"
+                preintv_drop = _preintv_drop_mask(is_takeover, preintv_window)
+                if include_steered:
+                    # Original (pre-ablation) behavior: steered frames are kept and counted as
+                    # intervention alongside human, like SIRIUS's own "human"/"steered" pooling.
+                    drop = preintv_drop
+                    is_intervention = is_takeover
+                else:
+                    # Steered frames dropped entirely like preintv (see module docstring);
+                    # is_intervention is human-only.
+                    drop = preintv_drop | is_steered
+                    is_intervention = agent == "human"
+                keep = ~drop
 
             self.images = images[keep]
             self.wrist_images = wrist_images[keep]
@@ -122,6 +139,8 @@ class _HDF5Episode:
 
 
 def main(args):
+    if args.robot_only and args.include_steered:
+        raise ValueError("--robot_only and --include_steered are mutually exclusive.")
     if len(args.demo_name) == 1:
         demo_names = args.demo_name * len(args.raw_dataset_path)
     elif len(args.demo_name) == len(args.raw_dataset_path):
@@ -137,6 +156,7 @@ def main(args):
             demo_name=name,
             preintv_window=args.preintv_window,
             include_steered=args.include_steered,
+            robot_only=args.robot_only,
         )
         for path, name in zip(args.raw_dataset_path, demo_names, strict=True)
     ]
@@ -170,6 +190,13 @@ if __name__ == "__main__":
         help="Keep 'steered' frames and count them as is_intervention alongside 'human', instead "
         "of dropping them entirely (the default). For an A/B comparison against the no-steered "
         "ablation.",
+    )
+    parser.add_argument(
+        "--robot_only",
+        action="store_true",
+        help="Keep only 'robot' (autonomous-policy) frames, dropping every 'human' and 'steered' "
+        "frame outright -- no preintv trimming, is_intervention all-zero. For a no-corrections "
+        "ablation; mutually exclusive with --include_steered.",
     )
     args = parser.parse_args()
     main(args)

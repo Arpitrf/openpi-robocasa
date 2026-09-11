@@ -1142,10 +1142,84 @@ _CONFIGS = [
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
     ),
     TrainConfig(
+        # No-corrections ablation sibling of pi0_robocasa_coffeesetupmug_hitl_lora(_steered):
+        # same 5 demos, but built with convert_hitl_hdf5_to_lerobot.py --robot_only, which drops
+        # every "human"/"steered" frame outright and keeps only the autonomous-policy rollout.
+        # is_intervention is all-zero in this dataset, so intervention_p_target is None here
+        # (data_loader._intervention_sampler requires both classes present and raises otherwise)
+        # -- plain shuffling instead of the 50/50 SIRIUS resampling used by the other two configs.
+        # Everything else (LR schedule, step count) is held fixed so a training run on this
+        # isolates how much the human/steered correction frames are contributing, vs. just having
+        # more autonomous rollout to imitate.
+        name="pi0_robocasa_coffeesetupmug_hitl_lora_robotonly",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_all5_robotonly",
+            base_config=DataConfig(prompt_from_task=True),
+            intervention_p_target=None,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,  # see pi0_robocasa_coffeesetupmug_hitl_lora's comment -- disk budget
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
         # LoRA finetune of pi0_robocasa_pretrain_human300 on 7 pooled HITL StartElectricKettle
-        # demos. Same setup as pi0_robocasa_coffeesetupmug_hitl_lora_steered (steered frames kept,
-        # is_intervention = human OR steered, preintv_window=10, same LR schedule/step count) --
-        # only the steering-included variant was requested for this task, no no-steering ablation.
+        # demos. Steered frames dropped entirely, is_intervention = human-only -- the A/B sibling
+        # of pi0_robocasa_startelectrickettle_hitl_lora_steered below (steered frames kept), same
+        # relationship as pi0_robocasa_coffeesetupmug_hitl_lora vs. its _steered sibling.
+        name="pi0_robocasa_startelectrickettle_hitl_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_startelectrickettle_all7",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
+        # A/B sibling of pi0_robocasa_startelectrickettle_hitl_lora: steered frames kept and
+        # counted as is_intervention alongside human, instead of being dropped entirely.
         name="pi0_robocasa_startelectrickettle_hitl_lora_steered",
         model=pi0.Pi0Config(
             max_token_len=96,
