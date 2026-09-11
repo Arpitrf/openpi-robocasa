@@ -1,10 +1,13 @@
 """Roll out each saved checkpoint of an HG-DAGGER round from the round's fixed initial state and
 log the rollout videos back into that round's wandb run.
 
-Every episode is restored from the same recorded sim state the round was collected from
-(`init_states/<Task>/l0/demo_0_raw.hdf5`), so the only variation across the rollouts of one
+By default every episode is restored from the same recorded sim state the round was collected
+from (`init_states/<Task>/l0/demo_0_raw.hdf5`), so the only variation across the rollouts of one
 checkpoint is pi0's sampling noise -- the videos answer "what does this checkpoint do on the exact
-scene it was trained on", not "does it generalize".
+scene it was trained on", not "does it generalize". Pass `--init-state-dir` instead to run one
+rollout per `demo_*_raw.hdf5` file in that folder (e.g. a semantic_corrections `collect_states`
+output dir) for an L1-style eval across many initial scenes -- `n_rollouts` is then ignored in
+favor of the folder's episode count.
 
 Policies are loaded in-process (`policy_config.create_trained_policy`), so no policy server is
 needed; checkpoints are loaded one at a time in the order given.
@@ -19,6 +22,13 @@ Usage:
         --config-name pi0_robocasa_coffeesetupmug_hgdagger_r1 \
         --exp-name hgdagger-rounds-coffeesetupmug-r1 \
         --init-state-hdf5 init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5
+
+    # L1 eval across many initial scenes (folder of demo_*_raw.hdf5, e.g. a semantic_corrections
+    # collect_states output dir):
+    python examples/robocasa/eval_hgdagger_checkpoints.py \
+        --config-name pi0_robocasa_coffeesetupmug_hitl_lora \
+        --exp-name sirius_lora_no_steer_20k_v1 \
+        --init-state-dir /mnt/hdd3/arpit/semantic_corrections/expdata/pi0_hitl/CoffeeSetupMug/bootstrap/2026-08-30-14-24
 
 CAVEAT: `info["success"]` is robocasa's own task success check. The HITL demos this trains on
 often never trigger it themselves (see convert_hitl_hdf5_to_lerobot.py), so a 0% success rate
@@ -53,11 +63,16 @@ import openpi.training.config as _config
 class Args:
     config_name: str
     exp_name: str
-    init_state_hdf5: str
+    # Exactly one of init_state_hdf5 / init_state_dir must be set.
+    init_state_hdf5: str | None = None
+    # Folder of demo_*_raw.hdf5 (one rollout per file, e.g. a collect_states output dir).
+    init_state_dir: str | None = None
     env_name: str = "CoffeeSetupMug"
     demo_name: str = "demo_0"
     frame: int = 0
-    # Rollouts per checkpoint. All start from the same state; they differ only by sampling noise.
+    # Rollouts per checkpoint when init_state_hdf5 is used. All start from the same state; they
+    # differ only by sampling noise. Ignored (and overridden by the folder's episode count) when
+    # init_state_dir is used instead.
     n_rollouts: int = 3
     # Checkpoint steps to evaluate. Empty -> every step directory found, ascending.
     steps: list[int] = dataclasses.field(default_factory=list)
@@ -84,10 +99,26 @@ def _checkpoint_steps(exp_dir: pathlib.Path) -> list[int]:
     return sorted(steps)
 
 
-def _rollout(env, raw_env, gym_wrapper, policy, args: Args, horizon: int):
-    """One episode from the fixed init state. Returns (success, frames)."""
+def _init_state_paths(args: Args) -> list[pathlib.Path]:
+    """Resolve the ordered list of init-state HDF5s to roll out, one episode each."""
+    if args.init_state_dir:
+        state_dir = pathlib.Path(args.init_state_dir)
+        paths = sorted(
+            state_dir.glob("demo_*_raw.hdf5"),
+            key=lambda p: int(re.fullmatch(r"demo_(\d+)_raw\.hdf5", p.name).group(1)),
+        )
+        if not paths:
+            raise FileNotFoundError(f"no demo_*_raw.hdf5 files under {state_dir}")
+        return paths
+    if not args.init_state_hdf5:
+        raise ValueError("exactly one of --init-state-hdf5 / --init-state-dir must be set")
+    return [pathlib.Path(args.init_state_hdf5)] * args.n_rollouts
+
+
+def _rollout(env, raw_env, gym_wrapper, policy, args: Args, horizon: int, init_state_path: pathlib.Path):
+    """One episode from the given init state. Returns (success, frames)."""
     env.reset()
-    restore_sim_state_from_hdf5(raw_env, args.init_state_hdf5, demo_name=args.demo_name, frame=args.frame)
+    restore_sim_state_from_hdf5(raw_env, str(init_state_path), demo_name=args.demo_name, frame=args.frame)
     mark_gym_env_reset(env)
     obs = gym_wrapper.get_observation(raw_env._get_observations(force_update=True))
     task_lang = obs["annotation.human.task_description"]
@@ -148,6 +179,8 @@ def main(args: Args) -> None:
     steps = args.steps or _checkpoint_steps(exp_dir)
     horizon = args.horizon or int(get_task_horizon(args.env_name) * 1.5)
     out_base = pathlib.Path(args.out_dir) if args.out_dir else exp_dir / "evals"
+    init_state_paths = _init_state_paths(args)
+    n_rollouts = len(init_state_paths)
 
     run = None
     if args.log_to_wandb:
@@ -177,16 +210,16 @@ def main(args: Args) -> None:
             out_dir.mkdir(parents=True, exist_ok=True)
 
             successes, videos = 0, []
-            for i in tqdm.tqdm(range(args.n_rollouts), desc=f"step {step}"):
-                success, frames = _rollout(env, raw_env, gym_wrapper, policy, args, horizon)
+            for i, init_state_path in enumerate(tqdm.tqdm(init_state_paths, desc=f"step {step}")):
+                success, frames = _rollout(env, raw_env, gym_wrapper, policy, args, horizon, init_state_path)
                 successes += int(success)
                 mp4 = out_dir / f"rollout_{i}_{'success' if success else 'failure'}.mp4"
                 imageio.mimwrite(str(mp4), [np.asarray(f) for f in frames], fps=20)
                 videos.append((i, mp4, success))
                 logging.info("step %d rollout %d: success=%s (%d frames)", step, i, success, len(frames))
 
-            stats = {"step": step, "n_rollouts": args.n_rollouts, "successes": successes,
-                     "success_rate": successes / args.n_rollouts}
+            stats = {"step": step, "n_rollouts": n_rollouts, "successes": successes,
+                     "success_rate": successes / n_rollouts}
             (out_dir / "stats.json").write_text(json.dumps(stats, indent=2))
             all_stats[step] = stats
 
