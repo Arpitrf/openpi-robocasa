@@ -73,6 +73,8 @@ class Args:
     weld_eef_body: str | None = None
     weld_name: str = "hitl_mug_eef_weld"
     weld_solref: str = "0.02 1"
+    # Overrides where rollout mp4s/stats.json are written (default: <exp_dir>/evals/step_<N>).
+    out_dir: str | None = None
 
 
 def _checkpoint_steps(exp_dir: pathlib.Path) -> list[int]:
@@ -145,6 +147,7 @@ def main(args: Args) -> None:
     exp_dir = pathlib.Path(train_config.checkpoint_base_dir) / args.config_name / args.exp_name
     steps = args.steps or _checkpoint_steps(exp_dir)
     horizon = args.horizon or int(get_task_horizon(args.env_name) * 1.5)
+    out_base = pathlib.Path(args.out_dir) if args.out_dir else exp_dir / "evals"
 
     run = None
     if args.log_to_wandb:
@@ -170,7 +173,7 @@ def main(args: Args) -> None:
     try:
         for step in steps:
             policy = _policy_config.create_trained_policy(train_config, exp_dir / str(step))
-            out_dir = exp_dir / "evals" / f"step_{step}"
+            out_dir = out_base / f"step_{step}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
             successes, videos = 0, []
