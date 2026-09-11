@@ -1141,6 +1141,41 @@ _CONFIGS = [
         assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
     ),
+    TrainConfig(
+        # LoRA finetune of pi0_robocasa_pretrain_human300 on 7 pooled HITL StartElectricKettle
+        # demos. Same setup as pi0_robocasa_coffeesetupmug_hitl_lora_steered (steered frames kept,
+        # is_intervention = human OR steered, preintv_window=10, same LR schedule/step count) --
+        # only the steering-included variant was requested for this task, no no-steering ablation.
+        name="pi0_robocasa_startelectrickettle_hitl_lora_steered",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_startelectrickettle_all7_steered",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
