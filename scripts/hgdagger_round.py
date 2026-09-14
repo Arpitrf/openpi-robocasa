@@ -155,7 +155,7 @@ def stage_collect(args, r: int, rdir: pathlib.Path) -> None:
         print(f"resuming round {r}: {have} demos already recorded, collecting {args.demos_per_round - have} more")
     cmd = [
         args.python, "scripts/run_pi0_hitl.py",
-        "--config", args.collect_config,
+        "--config", str(args.collect_config),
         "--run.output-dir", str(rdir),
         "--run.demo-start-idx", str(have),
         "--run.num-episodes", str(args.demos_per_round - have),
@@ -265,8 +265,11 @@ def main() -> None:
                    help="Where rounds are stored. Default: <this repo>/expdata (gitignored), NOT "
                         "semantic_corrections/expdata -- the demos belong with the training code "
                         "that consumes them.")
-    p.add_argument("--collect-config", default="configs/hitl/hgdagger_coffee.yaml",
-                   help="HITL YAML, relative to --sc-root")
+    p.add_argument("--collect-config", type=pathlib.Path,
+                   default=REPO_ROOT / "configs" / "hgdagger_coffee.yaml",
+                   help="HITL YAML. Lives in this repo (not --sc-root): its `defaults:` entries "
+                        "resolve against semantic_corrections/configs regardless of this file's "
+                        "own location, since load_yaml_dict takes configs_root separately.")
     p.add_argument("--init-state", type=pathlib.Path,
                    default=REPO_ROOT / "init_states" / "CoffeeMugSetup" / "l0" / "demo_0_raw.hdf5")
     p.add_argument("--python", default=sys.executable)
@@ -293,6 +296,14 @@ def main() -> None:
         raise SystemExit(f"init state not found: {args.init_state}")
     if shutil.which("nvidia-smi") is None:
         print("warning: nvidia-smi not found; GPU checks skipped")
+
+    # Anaconda sets __EGL_VENDOR_LIBRARY_DIRS to its own share/glvnd/egl_vendor.d, which lists
+    # only Mesa ICDs. glvnd then never loads libEGL_nvidia.so.0, so the NVIDIA cards are visible
+    # to EGL only through Mesa, where eglInitialize fails -- MuJoCo's headless renderer dies with
+    # "Cannot initialize a EGL device display". Point glvnd back at the system vendor dir so the
+    # NVIDIA ICD is found; it enumerates the GPUs first, in nvidia-smi order, which is what
+    # robosuite's egl_context.py assumes when it indexes the device list by CUDA_VISIBLE_DEVICES.
+    os.environ["__EGL_VENDOR_LIBRARY_DIRS"] = "/usr/share/glvnd/egl_vendor.d"
 
     r = args.round
     rdir = round_dir(args.expdata, args.env_name, r)

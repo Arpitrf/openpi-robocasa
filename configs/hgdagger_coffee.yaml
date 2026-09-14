@@ -45,7 +45,7 @@ cameras:
   show_viewer: false
 
 bootstrap:
-  load_state_hdf5: /home/skand/Documents/robocasa-code/openpi-robocasa/init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5
+  load_state_hdf5: /home/skand/semantic_corrections/openpi-robocasa/init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5
   load_state_frame_mode: fixed
   load_state_frame: 0
   load_state_demo_name: demo_0

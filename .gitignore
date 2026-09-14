@@ -5,6 +5,8 @@ data/
 wandb/
 exp_resources/
 expdata/
+corrections/
+robocasa_pi0/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

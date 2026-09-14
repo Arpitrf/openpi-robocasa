@@ -163,7 +163,7 @@ wandb's global step and wandb refuses to go backwards on it.
 
 ```bash
 cd ../semantic_corrections
-$P scripts/run_pi0_hitl.py --config configs/hitl/hgdagger_coffee.yaml \
+$P scripts/run_pi0_hitl.py --config ../openpi-robocasa/configs/hgdagger_coffee.yaml \
     --run.output-dir ../openpi-robocasa/expdata/hgdagger/CoffeeSetupMug/round_1 \
     --run.demo-start-idx 0 --run.num-episodes 10
 ```

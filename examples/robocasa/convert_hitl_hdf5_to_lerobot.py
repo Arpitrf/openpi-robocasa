@@ -97,7 +97,7 @@ class _Segment:
         self.task_lang = task_lang
 
 
-def load_segments(hdf5_path, demo_name="demo_0", preintv_window=10, min_segment_len=1):
+def load_segments(hdf5_path, demo_name="demo_0", preintv_window=10, min_segment_len=1, include_steered=False):
     """Read one demo and split it into training segments. Returns (segments, stats)."""
     with h5py.File(hdf5_path, "r") as f:
         demo = f["data"][demo_name]
@@ -118,14 +118,18 @@ def load_segments(hdf5_path, demo_name="demo_0", preintv_window=10, min_segment_
         task_lang = json.loads(demo.attrs["ep_meta"])["lang"]
         agent = np.array([a.decode() for a in demo["acting_agent"][:]])
 
-    unknown = set(np.unique(agent)) - {"human", "robot"}
+    allowed = {"human", "robot"} | ({"steered"} if include_steered else set())
+    unknown = set(np.unique(agent)) - allowed
     if unknown:
         raise ValueError(
             f"{hdf5_path}: unexpected acting_agent value(s) {sorted(unknown)}; this converter "
-            f"only understands 'human' and 'robot'."
+            f"understands {sorted(allowed)}"
+            + ("." if include_steered else ". Pass --include_steered to treat 'steered' frames as intervention.")
         )
 
-    is_human = agent == "human"
+    # is_intervention is "not the autonomous policy": with --include_steered, human-steered frames
+    # join human-teleop frames in that class, so the sampler's 50/50 target is robot vs both.
+    is_human = (agent == "human") | (include_steered & (agent == "steered"))
     drop = _preintv_drop_mask(is_human, preintv_window)
     keep = ~drop
 
@@ -157,6 +161,7 @@ def load_segments(hdf5_path, demo_name="demo_0", preintv_window=10, min_segment_
         "task_lang": task_lang,
         "frames_raw": int(len(agent)),
         "frames_human_raw": int(is_human.sum()),
+        "frames_steered_raw": int((agent == "steered").sum()),
         "frames_dropped_preintv": int(drop.sum()),
         "frames_dropped_short_segments": int(short_frames),
         "frames_kept": kept_frames,
@@ -199,6 +204,7 @@ def main(args):
             demo_name=demo_name,
             preintv_window=args.preintv_window,
             min_segment_len=args.min_segment_len,
+            include_steered=args.include_steered,
         )
         stats["round"] = round_name
         episodes.extend(segments)
@@ -229,8 +235,10 @@ def main(args):
         "repo_name": args.repo_name,
         "preintv_window": args.preintv_window,
         "min_segment_len": args.min_segment_len,
+        "include_steered": args.include_steered,
         "totals": {
             "source_demos": len(source_stats),
+            "frames_steered_raw": sum(s["frames_steered_raw"] for s in source_stats),
             "episodes_written": len(episodes),
             "frames_raw": sum(s["frames_raw"] for s in source_stats),
             "frames_dropped_preintv": sum(s["frames_dropped_preintv"] for s in source_stats),
@@ -286,6 +294,13 @@ if __name__ == "__main__":
         help="Drop contiguous kept-frame segments shorter than this many frames. Short segments "
         "only yield end-padded action chunks (openpi applies no pad mask). Default 1 keeps "
         "everything; see dataset_manifest.json for the length distribution.",
+    )
+    parser.add_argument(
+        "--include_steered",
+        action="store_true",
+        help="Accept acting_agent == 'steered' and label those frames as intervention alongside "
+        "'human'. Off by default: the HG-DAGGER rounds define intervention as human-only, and "
+        "silently folding steered frames in would make their aggregated dataset inconsistent.",
     )
     args = parser.parse_args()
     main(args)

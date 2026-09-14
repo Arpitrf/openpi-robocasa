@@ -754,6 +754,69 @@ def hgdagger_lora_configs(
     ]
 
 
+def corrections_lora_config(
+    env_name: str = "CoffeeSetupMug",
+    repo_id: str = "corrections_coffeemug",
+    *,
+    num_train_steps: int = 20_000,
+    save_interval: int = 2_000,
+    batch_size: int = 8,
+    eval_interval: int | None = 2_000,
+    eval_rollouts: int = 2,
+    init_state: str = "init_states/CoffeeMugSetup/l0/demo_0_raw.hdf5",
+) -> "TrainConfig":
+    """LoRA finetune on a set of semantic-correction demos, from the RoboCasa pretrain checkpoint.
+
+    Unlike hgdagger_lora_configs this is a single one-shot run, not a round chain: there is no
+    previous round to warm-start from, so it always re-LoRAs the pretrain checkpoint. LoRA ranks,
+    optimizer and peak LR match the HG-DAGGER rounds so the two are comparable; only the run
+    length and schedule differ.
+
+    intervention_p_target stays at LeRobotRobocasaHitlDataConfig's 0.5 default, so the
+    WeightedRandomSampler draws ~50/50 robot vs human frames regardless of the natural ratio.
+    """
+    model = pi0.Pi0Config(
+        max_token_len=96,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+    )
+    return TrainConfig(
+        name=f"pi0_robocasa_{env_name.lower()}_corrections",
+        model=model,
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id=repo_id,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=model.get_freeze_filter(),
+        ema_decay=None,
+        # 1_000 warmup is openpi's default and is 5% of a 20k run (at the rounds' 5k it would have
+        # been a fifth, which is why those use 200); decay spans the full run so LR actually lands
+        # near decay_lr instead of stopping near peak.
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=num_train_steps,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=num_train_steps,
+        save_interval=save_interval,
+        keep_period=save_interval,
+        batch_size=batch_size,
+        num_workers=2,
+        # Each sim rollout costs ~45s, so the rounds' eval_interval=100 would spend longer
+        # evaluating than training over a 20k run; tied to save_interval instead.
+        eval_interval=eval_interval,
+        eval_rollouts=eval_rollouts,
+        eval_init_state=str(_REPO_ROOT / init_state),
+        eval_env_name=env_name,
+        eval_weld_on_grasp=True,
+        project_name="semantic-corrections",
+        assets_base_dir=str(_REPO_ROOT / "assets"),
+        checkpoint_base_dir=str(_REPO_ROOT / "checkpoints"),
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -1234,6 +1297,7 @@ _CONFIGS = [
     ),
     *hgdagger_lora_configs("CoffeeSetupMug"),
     *hgdagger_lora_configs("CoffeeSetupMug", freeze_vision_tower=True),
+    corrections_lora_config(),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
