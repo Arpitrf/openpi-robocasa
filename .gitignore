@@ -173,3 +173,7 @@ cython_debug/
 # added by Soroush
 checkpoints
 MUJOCO_LOG.TXT
+olaf_sidecars/cache/
+logs/
+videos/
+eval_*/

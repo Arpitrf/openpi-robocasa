@@ -1183,6 +1183,58 @@ _CONFIGS = [
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
     ),
     TrainConfig(
+        # OLAF (https://ut-austin-rpl.github.io/olaf/, arXiv:2310.17555) arm of the CoffeeSetupMug
+        # comparison: same 5 demos and the identical LR schedule / step count as
+        # pi0_robocasa_coffeesetupmug_hitl_lora, with exactly one difference -- the 50
+        # pre-intervention frames that config drops are kept here, their actions replaced by the
+        # candidate a VLM picked (from 50 pi0 samples) as best carrying out the human's recorded
+        # verbal correction, and labeled is_intervention. Built with
+        # convert_hitl_hdf5_to_lerobot.py --olaf_sidecar (see examples/robocasa/olaf_relabel.py).
+        # 1735 frames / 540 is_intervention, vs. 1685 / 490 for the no-OLAF sibling.
+        #
+        # intervention_p_target stays at the 0.5 default -- both classes are present, and the 50
+        # relabeled frames therefore carry ~4.6% of the training signal (50/540 of the intervention
+        # class, which gets half of every batch), not the 2.9% their raw count suggests.
+        #
+        # Unexplored alternative, noted rather than built: label the relabeled frames
+        # is_intervention=0 instead, i.e. treat them as a SIRIUS "preintv" class at lower weight.
+        name="pi0_robocasa_coffeesetupmug_olaf_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_all5_olaf",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        # Same cadence as the three sibling configs, deliberately: their best eval results came
+        # from step 7500, so dropping to save_interval=5_000 would leave nothing to compare there.
+        save_interval=2_500,
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        # Checkpoints go to hdd4, not hdd1 like the sibling configs: this run needs ~72GiB and
+        # hdd1 has only 47GiB free (the five existing 20k runs fill it). The siblings deliberately
+        # keep their hdd1 paths so their already-written checkpoints stay findable by
+        # eval_hgdagger_checkpoints.py -- do not "tidy" them to match this one.
+        checkpoint_base_dir="/mnt/hdd4/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
         # LoRA finetune of pi0_robocasa_pretrain_human300 on 7 pooled HITL StartElectricKettle
         # demos. Steered frames dropped entirely, is_intervention = human-only -- the A/B sibling
         # of pi0_robocasa_startelectrickettle_hitl_lora_steered below (steered frames kept), same
@@ -1216,6 +1268,47 @@ _CONFIGS = [
         project_name="semantic-corrections",
         assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
+        # OLAF arm of the StartElectricKettle comparison. Same 7 demos and the identical LR
+        # schedule / step count as pi0_robocasa_startelectrickettle_hitl_lora -- the only
+        # difference is that the 70 pre-intervention frames that config drops are kept here with
+        # actions a VLM chose (from 50 pi0 chunks) as best carrying out the human's recorded verbal
+        # correction, and labeled is_intervention. See examples/robocasa/olaf_relabel.py.
+        # 3392 frames / 724 is_intervention, vs 3322 / 654 for the no-OLAF sibling.
+        #
+        # Checkpoints go to hdd4, not hdd1 like the sibling configs: hdd1 has ~47GiB free and this
+        # run needs ~72GiB. The siblings keep their hdd1 paths so their already-written checkpoints
+        # stay findable by eval_hgdagger_checkpoints.py -- do not "tidy" them to match.
+        name="pi0_robocasa_startelectrickettle_olaf_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_startelectrickettle_all7_olaf",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd4/sa53925/openpi-robocasa/checkpoints",
     ),
     TrainConfig(
         # A/B sibling of pi0_robocasa_startelectrickettle_hitl_lora: steered frames kept and
