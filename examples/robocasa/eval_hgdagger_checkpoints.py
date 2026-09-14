@@ -209,17 +209,26 @@ def main(args: Args) -> None:
             out_dir = out_base / f"step_{step}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            successes, videos = 0, []
+            successes, videos, episodes = 0, [], []
             for i, init_state_path in enumerate(tqdm.tqdm(init_state_paths, desc=f"step {step}")):
                 success, frames = _rollout(env, raw_env, gym_wrapper, policy, args, horizon, init_state_path)
                 successes += int(success)
                 mp4 = out_dir / f"rollout_{i}_{'success' if success else 'failure'}.mp4"
                 imageio.mimwrite(str(mp4), [np.asarray(f) for f in frames], fps=20)
                 videos.append((i, mp4, success))
+                episodes.append(
+                    {"index": i, "init_state": init_state_path.name, "success": bool(success)}
+                )
                 logging.info("step %d rollout %d: success=%s (%d frames)", step, i, success, len(frames))
 
             stats = {"step": step, "n_rollouts": n_rollouts, "successes": successes,
-                     "success_rate": successes / n_rollouts}
+                     "success_rate": successes / n_rollouts,
+                     # Per-episode outcomes, not just the aggregate. With --init-state-dir every arm
+                     # sees the same ordered scenes, so `init_state` lets results be joined across
+                     # arms for a paired comparison -- which scenes an arm fixed and which it broke.
+                     # At n=50 that is far more informative than comparing two success rates, where
+                     # the standard error swamps most differences.
+                     "episodes": episodes}
             (out_dir / "stats.json").write_text(json.dumps(stats, indent=2))
             all_stats[step] = stats
 
