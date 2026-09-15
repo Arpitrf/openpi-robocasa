@@ -62,6 +62,36 @@ class Policy(BasePolicy):
         }
         return outputs
 
+    def infer_batch(self, obs: dict, num_samples: int) -> list[dict]:
+        """Run batched inference producing ``num_samples`` diverse action samples
+        from a single observation in one forward pass."""
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(
+            lambda x: jnp.tile(jnp.asarray(x)[np.newaxis, ...], [num_samples] + [1] * np.ndim(x)),
+            inputs,
+        )
+
+        start_time = time.monotonic()
+        self._rng, sample_rng = jax.random.split(self._rng)
+        outputs = {
+            "state": inputs["state"],
+            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **self._sample_kwargs),
+        }
+        model_time = time.monotonic() - start_time
+
+        results = []
+        for i in range(num_samples):
+            single = jax.tree.map(lambda x: np.asarray(x[i, ...]), outputs)
+            single = self._output_transform(single)
+            single["policy_timing"] = {"infer_ms": model_time * 1000}
+            results.append(single)
+        return results
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._metadata
+
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata

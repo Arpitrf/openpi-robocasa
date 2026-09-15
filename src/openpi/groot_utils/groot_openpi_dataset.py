@@ -254,6 +254,8 @@ def _load_norm_stats_from_groot_dataset(ds_meta: dict) -> dict[str, _transforms.
     dataset_path = ds_meta["path"]
     dataset_path = pathlib.Path(dataset_path)
     path = dataset_path / "meta" / "stats.json"
+    if not path.exists():
+        return None
     data = json.loads(path.read_text())
 
     """
@@ -394,8 +396,16 @@ def _load_norm_stats_from_groot_mixture_dataset(dataset_meta_list) -> dict[str, 
     per_dataset_norm_stats = []
     for ds_meta in dataset_meta_list:
         per_dataset_norm_stats.append(_load_norm_stats_from_groot_dataset(ds_meta))
-    
+
+    # Filter out None entries (missing local dataset files)
+    valid = [(s, 1.0) for s in per_dataset_norm_stats if s is not None]
+    if not valid:
+        return None
+    valid_stats, weights = zip(*valid)
+
     return compute_overall_statistics(
-        per_dataset_norm_stats,
-        dataset_sampling_weights=np.ones(len(dataset_meta_list)),
+        # per_dataset_norm_stats,
+        # dataset_sampling_weights=np.ones(len(dataset_meta_list)),
+        list(valid_stats),
+        dataset_sampling_weights=np.array(weights),
     )

@@ -1,8 +1,10 @@
-# Data directories.
+cd # Data directories.
 assets/
 checkpoints/
 data/
 wandb/
+expdata/
+exp_resources/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
