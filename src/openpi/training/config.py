@@ -513,6 +513,50 @@ class LeRobotRobocasaHitlDataConfig(DataConfigFactory):
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotDroidHitlDataConfig(DataConfigFactory):
+    """Real-DROID-robot sibling of LeRobotRobocasaHitlDataConfig, for datasets written by
+    convert_realworld_hitl_hdf5_to_lerobot.py: same image/wrist_image/state/actions schema and
+    SIRIUS-style intervention_p_target reweighting, but wired to droid_policy.DroidHitlInputs
+    (state is joint_position++gripper_position, action is joint_velocity++gripper_position, both
+    8-dim) instead of robocasa_policy's EE-pose state / EE-delta action space. No delta-action
+    transform: the action is already joint *velocity*, not absolute position.
+    """
+
+    intervention_p_target: float | None = 0.5
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image_1_left": "image",
+                        "observation/wrist_image_left": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[droid_policy.DroidHitlInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[droid_policy.DroidOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            intervention_p_target=self.intervention_p_target,
+        )
+
+
 @dataclasses.dataclass
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -610,6 +654,12 @@ _ROBOCASA_PRETRAIN_HUMAN300_PARAMS = os.path.expanduser(
     "~/.cache/openpi/robocasa/robocasa365_checkpoints/pi0/pi0_robocasa_pretrain_human300/"
     "multitask_learning/75000/params"
 )
+
+# Released pi0-DROID checkpoint (flow action decoding, joint-velocity-compatible action space via
+# droid_policy's 8-dim state/action convention). Used as the LoRA finetuning start point for
+# real-world HITL configs below, so training only has to learn the task-specific correction from a
+# handful of real-robot demos, not DROID's action space/cameras/embodiment from scratch.
+_PI0_DROID_PARAMS = "gs://openpi-assets/checkpoints/pi0_droid/params"
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
@@ -1235,6 +1285,53 @@ _CONFIGS = [
         checkpoint_base_dir="/mnt/hdd4/sa53925/openpi-robocasa/checkpoints",
     ),
     TrainConfig(
+        # LoRA finetune of pi0_robocasa_pretrain_human300 on the 10-demo dagger-round-1 HITL data
+        # from /mnt/hdd3/arpit/semantic_corrections/expdata/limit_exp/CoffeeSetupMug/ ("limit_exp":
+        # training on a single fixed pose (the pi0_hitl_all5/_steered/_robotonly/_olaf configs
+        # above) doesn't translate to varied layouts, so this dagger round was collected across
+        # varied initial layouts instead). Same recipe as pi0_robocasa_coffeesetupmug_hitl_lora_steered
+        # (preintv_window=10, --include_steered) -- these hdf5s only ever label "human"/"robot"
+        # (no "steered" frames present), so --include_steered was a no-op at conversion time, kept
+        # for recipe consistency with the other CoffeeSetupMug arms. Built with:
+        #   python examples/robocasa/convert_hitl_hdf5_to_lerobot.py \
+        #       --repo_name hitl_coffeesetupmug_limitexp_dagger1_all10 --include_steered \
+        #       --raw_dataset_path <dagger-round-1/demo_0..demo_9.hdf5> \
+        #       --demo_name demo_0 demo_1 demo_2 demo_0 demo_4 demo_5 demo_6 demo_7 demo_8 demo_9
+        # (demo_3.hdf5's internal group is "demo_0", not "demo_3" -- a quirk of the source data,
+        # verified directly against each file rather than assumed).
+        name="pi0_robocasa_coffeesetupmug_limitexp_dagger1_hitl_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_limitexp_dagger1_all10",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,  # see pi0_robocasa_coffeesetupmug_hitl_lora's comment -- disk budget
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        # hdd1 has only 47GiB free (the existing 20k runs fill it) and this run needs ~56GiB --
+        # same reasoning as pi0_robocasa_coffeesetupmug_olaf_lora's hdd4 placement above.
+        checkpoint_base_dir="/mnt/hdd4/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
         # LoRA finetune of pi0_robocasa_pretrain_human300 on 7 pooled HITL StartElectricKettle
         # demos. Steered frames dropped entirely, is_intervention = human-only -- the A/B sibling
         # of pi0_robocasa_startelectrickettle_hitl_lora_steered below (steered frames kept), same
@@ -1342,6 +1439,91 @@ _CONFIGS = [
         project_name="semantic-corrections",
         assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
+    #
+    # Real-world (non-RoboCasa-sim) HITL LoRA configs. Same DAgger recipe as the RoboCasa configs
+    # above (SIRIUS intervention reweighting, preintv_window=10, LoRA), but starting from the
+    # released pi0_droid checkpoint instead of pi0_robocasa_pretrain_human300, and reading hdf5s
+    # recorded on a real Panda/DROID rig (joint-velocity action space) via
+    # convert_realworld_hitl_hdf5_to_lerobot.py rather than convert_hitl_hdf5_to_lerobot.py. These
+    # hdf5s' acting_agent is only ever "human"/"robot" (verified on LoadCoffee, 2026-09-14) -- no
+    # "steered" label -- so intervention_p_target=0.5 alone gives the target 50/50 robot/human
+    # batch mix; there is no steered-inclusion variant to build here unlike the RoboCasa configs.
+    #
+    TrainConfig(
+        # LoRA finetune of the released pi0_droid checkpoint on 4 pooled real-world LoadCoffee HITL
+        # demos. action_horizon=10 mirrors pi0_droid's own inference config (src/openpi/training/
+        # config.py's "pi0_droid" entry) -- must match since we're starting from its weights.
+        # See README_HITL_LORA.md's real-world section for the conversion command and norm-stats
+        # step.
+        name="pi0_droid_loadcoffee_hitl_lora",
+        model=pi0.Pi0Config(
+            action_horizon=10,
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotDroidHitlDataConfig(
+            repo_id="hitl_loadcoffee_all4",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_PI0_DROID_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        # Same warmup:decay ratio as the RoboCasa HITL LoRA configs -- no domain-specific tuning
+        # done yet for real-world data; treat as a starting point pending the smoke-test run.
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,  # see pi0_robocasa_coffeesetupmug_hitl_lora's comment -- disk budget
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
+        # Real-world task #2, identical recipe to pi0_droid_loadcoffee_hitl_lora (see its comments
+        # above) -- LoRA finetune of pi0_droid on 5 pooled real-world ToastCroissant HITL demos.
+        # Separate repo_id/checkpoint dir: per-task checkpoints, data never combined across tasks.
+        # acting_agent verified "human"/"robot" only (no "steered") on all 5 episodes, 2026-09-15.
+        name="pi0_droid_toastcroissant_hitl_lora",
+        model=pi0.Pi0Config(
+            action_horizon=10,
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotDroidHitlDataConfig(
+            repo_id="hitl_toastcroissant_all5",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_PI0_DROID_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/checkpoints",
     ),
 ]
 

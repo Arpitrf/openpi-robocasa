@@ -11,6 +11,11 @@ training dataset). Two changes:
   2. Added an `is_intervention` feature (SIRIUS-style human/robot label -- see
      convert_hitl_hdf5_to_lerobot.py) so training can reweight toward intervention frames; see
      LeRobotRobocasaHitlDataConfig.intervention_p_target in training/config.py.
+  3. Parameterized `fps`/`state_dim`/`action_dim`/`image_size` (all default to the original
+     hardcoded values: 20, 16, 12, 128) so the same function also serves
+     convert_realworld_hitl_hdf5_to_lerobot.py, whose real-DROID-robot episodes are 15 Hz with an
+     8-dim joint_position+gripper state and an 8-dim joint_velocity+gripper action -- not
+     RoboCasa's 20 Hz sim / 16-dim EE-pose state / 12-dim EE-delta action.
 """
 
 import logging
@@ -20,7 +25,15 @@ import shutil
 from openpi_client import image_tools
 
 
-def save_episodes_as_lerobot(episodes, repo_name, lerobot_home=None):
+def save_episodes_as_lerobot(
+    episodes,
+    repo_name,
+    lerobot_home=None,
+    fps=20,
+    state_dim=16,
+    action_dim=12,
+    image_size=128,
+):
     """Convert a list of EpisodeRecorder objects into a LeRobot dataset."""
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
@@ -35,26 +48,26 @@ def save_episodes_as_lerobot(episodes, repo_name, lerobot_home=None):
         repo_id=repo_name,
         root=output_path,
         robot_type="panda",
-        fps=20,
+        fps=fps,
         features={
             "image": {
                 "dtype": "image",
-                "shape": (128, 128, 3),
+                "shape": (image_size, image_size, 3),
                 "names": ["height", "width", "channel"],
             },
             "wrist_image": {
                 "dtype": "image",
-                "shape": (128, 128, 3),
+                "shape": (image_size, image_size, 3),
                 "names": ["height", "width", "channel"],
             },
             "state": {
                 "dtype": "float64",
-                "shape": (16,),
+                "shape": (state_dim,),
                 "names": ["state"],
             },
             "actions": {
                 "dtype": "float64",
-                "shape": (12,),
+                "shape": (action_dim,),
                 "names": ["actions"],
             },
             "is_intervention": {
@@ -69,8 +82,8 @@ def save_episodes_as_lerobot(episodes, repo_name, lerobot_home=None):
 
     for recorder in episodes:
         for i in range(len(recorder.actions)):
-            img = image_tools.resize_with_pad(recorder.images[i], 128, 128)
-            wrist = image_tools.resize_with_pad(recorder.wrist_images[i], 128, 128)
+            img = image_tools.resize_with_pad(recorder.images[i], image_size, image_size)
+            wrist = image_tools.resize_with_pad(recorder.wrist_images[i], image_size, image_size)
             img = image_tools.convert_to_uint8(img)
             wrist = image_tools.convert_to_uint8(wrist)
 
