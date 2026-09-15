@@ -218,6 +218,8 @@ def main(args: Args) -> None:
     raw_env = get_robosuite_env(env)
     gym_wrapper = get_robocasa_gym_wrapper(env)
 
+    logging.basicConfig(level=logging.INFO, force=True)
+
     all_stats = {}
     try:
         for step in steps:

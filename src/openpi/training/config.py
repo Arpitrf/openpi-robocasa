@@ -1332,6 +1332,53 @@ _CONFIGS = [
         checkpoint_base_dir="/mnt/hdd4/sa53925/openpi-robocasa/checkpoints",
     ),
     TrainConfig(
+        # Round 2: same recipe as pi0_robocasa_coffeesetupmug_limitexp_dagger1_hitl_lora above, but
+        # pooling dagger-round-1's 10 demos with a newly-collected dagger-round-2 (10 more demos,
+        # same varied-layout limit_exp collection). Round 2 hdf5s' internal demo group matches
+        # their filename in every case (no demo_3-style quirk this time -- verified directly).
+        # Built with:
+        #   python examples/robocasa/convert_hitl_hdf5_to_lerobot.py \
+        #       --repo_name hitl_coffeesetupmug_limitexp_dagger1and2_all20 --include_steered \
+        #       --raw_dataset_path <dagger-round-1/demo_0..9.hdf5> <dagger-round-2/demo_0..9.hdf5> \
+        #       --demo_name demo_0 demo_1 demo_2 demo_0 demo_4 demo_5 demo_6 demo_7 demo_8 demo_9 \
+        #                   demo_0 demo_1 demo_2 demo_3 demo_4 demo_5 demo_6 demo_7 demo_8 demo_9
+        name="pi0_robocasa_coffeesetupmug_limitexp_dagger2_hitl_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_coffeesetupmug_limitexp_dagger1and2_all20",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        # save_interval=keep_period=5_000 (not the sibling configs' 2_500): each checkpoint is
+        # ~8.9GiB (measured from the round-1 run), and every one of hdd1/hdd3/hdd4 is down to
+        # 30-47GiB free right now with several other runs writing concurrently -- 8 checkpoints at
+        # 2_500 would be ~71GiB, more than any single drive has free. 4 checkpoints (5000, 10000,
+        # 15000, plus the always-kept final 19999) is ~36GiB, placed on hdd1 (currently the most
+        # free at 47GiB, and not itself a checkpoint target for any other running job right now).
+        save_interval=5_000,
+        keep_period=5_000,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
+    ),
+    TrainConfig(
         # LoRA finetune of pi0_robocasa_pretrain_human300 on 7 pooled HITL StartElectricKettle
         # demos. Steered frames dropped entirely, is_intervention = human-only -- the A/B sibling
         # of pi0_robocasa_startelectrickettle_hitl_lora_steered below (steered frames kept), same
