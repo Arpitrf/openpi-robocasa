@@ -1488,6 +1488,67 @@ _CONFIGS = [
         assets_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/checkpoints",
     ),
+    TrainConfig(
+        # OLAF arm of the CloseBlenderLid comparison, sibling of pi0_robocasa_closeblenderlid_hitl_lora
+        # above (identical in every field except repo_id/checkpoint dir). Only 3 of the 4 demos were
+        # relabeled: 2026-09-15-00-41-35 has no demo_0_assets/keypoints.json (only an ambiguous
+        # demo_0_transfer_assets/type_1+type_2/keypoints_transferred.json whose own metadata points
+        # test_hdf5/test_frame at a *different* demo -- not trusted enough to repurpose, so its
+        # pre-intervention window is dropped the normal SIRIUS way instead of relabeled, same as
+        # olaf_relabel.py has no per-path skip and would otherwise crash on the missing file). Built
+        # with (window default 10 matches convert's --preintv_window default):
+        #   python examples/robocasa/olaf_relabel.py --out_dir olaf_sidecars_closeblenderlid \
+        #       --raw_dataset_path <2026-09-14-23-54-43, 2026-09-15-00-28-04, 2026-09-15-01-27-43
+        #       demo_0.hdf5 paths> --demo_name demo_0 demo_0 demo_0
+        #   python examples/robocasa/convert_hitl_hdf5_to_lerobot.py \
+        #       --repo_name hitl_closeblenderlid_all4_olaf --include_steered \
+        #       --raw_dataset_path <all 4 demo_0.hdf5 paths> --demo_name demo_0 demo_0 demo_0 demo_0 \
+        #       --olaf_sidecar <sidecar for 23-54-43> <sidecar for 00-28-04> none <sidecar for 01-27-43>
+        # 2363 frames (2333 in the non-OLAF sibling + the 30 relabeled frames from 3 windows).
+        #
+        # olaf_report.py --goal lid_knob,blender_lid,blender_top,blender_jar_top,jar_rim (keypoint
+        # ids aren't consistent across demos, hence the long preference list): only 1 of 3 windows
+        # moved toward its goal keypoint (the CoffeeSetupMug-style grasp correction, rank 0/50); the
+        # other 2 (both "position the lid above the blender jar" corrections) moved *away*, rank
+        # 49/50, despite better-ranked candidates existing in the pool (oracle -1.43/-0.45 cm) --
+        # unlike a "dead window" (no candidate improves at all), the VLM had a closer option and
+        # didn't take it. Plausibly a metric-mismatch case like the two noted in the original
+        # CoffeeSetupMug/StartElectricKettle report (a correction whose semantic intent is "move
+        # away/up first" reads as "away from the goal keypoint" on raw distance) rather than a bad
+        # pick, but unverified -- worth an eval comparison against the non-OLAF sibling rather than
+        # assuming either way.
+        name="pi0_robocasa_closeblenderlid_olaf_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_closeblenderlid_all4_olaf",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,  # see pi0_robocasa_coffeesetupmug_hitl_lora's comment -- disk budget
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        # Same hdd3 placement as the non-OLAF sibling -- 197G free comfortably covers both ~56GiB
+        # runs, unlike hdd1 (47G free) / hdd4 (83G free, already hosting other active runs).
+        assets_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/checkpoints",
+    ),
     #
     # Real-world (non-RoboCasa-sim) HITL LoRA configs. Same DAgger recipe as the RoboCasa configs
     # above (SIRIUS intervention reweighting, preintv_window=10, LoRA), but starting from the
