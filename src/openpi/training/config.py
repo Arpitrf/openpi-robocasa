@@ -1440,6 +1440,54 @@ _CONFIGS = [
         assets_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/assets",
         checkpoint_base_dir="/mnt/hdd1/sa53925/openpi-robocasa/checkpoints",
     ),
+    TrainConfig(
+        # LoRA finetune of pi0_robocasa_pretrain_human300 on 4 pooled HITL CloseBlenderLid demos
+        # (/mnt/hdd3/sa53925/semantic_corrections/expdata/pi0_hitl/CloseBlenderLid/monitored/ --
+        # copied here from Sriniket's uploaded CloseBlenderLid.zip, 2026-09-15; not under Arpit's
+        # expdata/ tree since that's not group-writable for this account). Same recipe as the
+        # CoffeeSetupMug/StartElectricKettle "_steered" siblings: preintv_window=10 (default),
+        # --include_steered. Unlike limitexp_dagger1, --include_steered is NOT a no-op here -- 2 of
+        # the 4 demos (2026-09-15-00-41-35, 2026-09-15-01-27-43) do carry "steered" frames (50 and
+        # 75 respectively) alongside "human"/"robot"; the other 2 are human/robot only. Built with:
+        #   python examples/robocasa/convert_hitl_hdf5_to_lerobot.py \
+        #       --repo_name hitl_closeblenderlid_all4 --include_steered \
+        #       --raw_dataset_path <4 monitored/<date>/demo_0.hdf5 paths> \
+        #       --demo_name demo_0 demo_0 demo_0 demo_0
+        # 2423 raw frames -> 2333 after preintv trimming (590/790/472/481 per episode).
+        name="pi0_robocasa_closeblenderlid_hitl_lora",
+        model=pi0.Pi0Config(
+            max_token_len=96,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaHitlDataConfig(
+            repo_id="hitl_closeblenderlid_all4",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(_ROBOCASA_PRETRAIN_HUMAN300_PARAMS),
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=800,
+            peak_lr=2.5e-5,
+            decay_steps=20_000,
+            decay_lr=2.5e-6,
+        ),
+        num_train_steps=20_000,
+        save_interval=2_500,  # see pi0_robocasa_coffeesetupmug_hitl_lora's comment -- disk budget
+        keep_period=2_500,
+        batch_size=8,
+        num_workers=2,
+        project_name="semantic-corrections",
+        # hdd1 (47G free) and hdd4 (83G free, already hosting the active limitexp_dagger1 run) are
+        # both tight -- hdd3 has the most headroom (197G free) and already holds the DROID configs'
+        # checkpoints under this account (pi0_droid_loadcoffee_hitl_lora et al.), so mirroring that
+        # placement here rather than fighting the other two disks for space.
+        assets_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/assets",
+        checkpoint_base_dir="/mnt/hdd3/sa53925/openpi-robocasa/checkpoints",
+    ),
     #
     # Real-world (non-RoboCasa-sim) HITL LoRA configs. Same DAgger recipe as the RoboCasa configs
     # above (SIRIUS intervention reweighting, preintv_window=10, LoRA), but starting from the
