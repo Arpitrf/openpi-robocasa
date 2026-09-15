@@ -48,7 +48,7 @@ import numpy as np
 import tqdm
 import tyro
 from hitl_env import get_robocasa_gym_wrapper, get_robosuite_env, mark_gym_env_reset, refresh_gym_observation
-from mug_weld import apply_object_eef_weld, break_object_eef_weld
+from mug_weld import apply_object_eef_weld, break_object_eef_weld, check_fixture_grasped
 from hitl_obs import obs_to_camera_frames, obs_to_policy_state
 from openpi_client import image_tools
 from robocasa.utils.dataset_registry_utils import get_task_horizon
@@ -87,6 +87,11 @@ class Args:
     weld_obj_name: str = "obj"
     weld_eef_body: str | None = None
     weld_name: str = "hitl_mug_eef_weld"
+    # Dot-path attribute chain on raw_env resolving to a fixture object (e.g. "blender.blender_lid"
+    # for CloseBlenderLid) whose f"{name}_main" body gets welded, for tasks with no _get_obj_cfgs
+    # (so weld_obj_name is never in raw_env.objects and the weld-on-grasp trigger below would
+    # otherwise silently never fire). Leave unset for object-based tasks like CoffeeSetupMug.
+    weld_fixture_attr: str | None = None
     weld_solref: str = "0.02 1"
     # Overrides where rollout mp4s/stats.json are written (default: <exp_dir>/evals/step_<N>).
     out_dir: str | None = None
@@ -154,12 +159,23 @@ def _rollout(env, raw_env, gym_wrapper, policy, args: Args, horizon: int, init_s
             break_object_eef_weld(raw_env, args.weld_name)
             weld_active = False
         elif args.weld_on_grasp and not weld_active and gripper_cmd > 0:
-            from robocasa.utils.object_utils import check_obj_grasped
+            if args.weld_fixture_attr is not None:
+                fixture = raw_env
+                for attr in args.weld_fixture_attr.split("."):
+                    fixture = getattr(fixture, attr)
+                fixture_body = f"{fixture.name}_main"
+                grasped = check_fixture_grasped(raw_env, fixture_body)
+            else:
+                from robocasa.utils.object_utils import check_obj_grasped
 
-            if args.weld_obj_name in raw_env.objects and check_obj_grasped(raw_env, args.weld_obj_name):
+                fixture_body = None
+                grasped = args.weld_obj_name in raw_env.objects and check_obj_grasped(raw_env, args.weld_obj_name)
+
+            if grasped:
                 apply_object_eef_weld(
                     raw_env,
                     object_name=args.weld_obj_name,
+                    object_body=fixture_body,
                     eef_body=args.weld_eef_body,
                     weld_name=args.weld_name,
                     solref=args.weld_solref,

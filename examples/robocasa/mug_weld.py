@@ -47,20 +47,30 @@ def resolve_weld_bodies(
     raw_env,
     *,
     object_name: str = "obj",
+    object_body: str | None = None,
     arm: str | None = None,
     eef_body: str | None = None,
 ) -> WeldBodies:
-    """Return gripper and object root body names in the compiled sim model."""
+    """Return gripper and object root body names in the compiled sim model.
+
+    ``object_body`` bypasses the ``raw_env.objects[object_name]`` lookup entirely -- pass the
+    MJCF body name directly for tasks whose manipulated part is a fixture (e.g.
+    CloseBlenderLid's blender_lid, StartElectricKettle's kettle lid), which never appear in
+    ``env.objects`` since they have no ``_get_obj_cfgs``.
+    """
     robot = raw_env.robots[0]
     arm = arm or robot.arms[0]
-    if object_name not in raw_env.objects:
-        known = ", ".join(sorted(raw_env.objects.keys()))
-        raise KeyError(f"object {object_name!r} not in env.objects ({known})")
+    if object_body is not None:
+        resolved_object_body = object_body
+    else:
+        if object_name not in raw_env.objects:
+            known = ", ".join(sorted(raw_env.objects.keys()))
+            raise KeyError(f"object {object_name!r} not in env.objects ({known})")
+        resolved_object_body = raw_env.objects[object_name].root_body
 
     resolved_eef = eef_body or robot.robot_model.eef_name[arm]
-    object_body = raw_env.objects[object_name].root_body
     sim = raw_env.sim
-    for label, body in (("eef", resolved_eef), ("object", object_body)):
+    for label, body in (("eef", resolved_eef), ("object", resolved_object_body)):
         try:
             sim.model.body_name2id(body)
         except ValueError as exc:
@@ -69,7 +79,7 @@ def resolve_weld_bodies(
         object_name=object_name,
         arm=arm,
         eef_body=resolved_eef,
-        object_body=object_body,
+        object_body=resolved_object_body,
     )
 
 
@@ -297,6 +307,7 @@ def apply_object_eef_weld(
     raw_env,
     *,
     object_name: str = "obj",
+    object_body: str | None = None,
     arm: str | None = None,
     eef_body: str | None = None,
     weld_name: str = "debug_mug_eef_weld",
@@ -306,11 +317,12 @@ def apply_object_eef_weld(
     """Inject a weld between object root body and EEF, then reload MJCF and restore state.
 
     ``relpose`` is computed from the **current** sim poses so the object does not jump
-    when the constraint is enabled.
+    when the constraint is enabled. See ``resolve_weld_bodies`` for ``object_body``.
     """
     bodies = resolve_weld_bodies(
         raw_env,
         object_name=object_name,
+        object_body=object_body,
         arm=arm,
         eef_body=eef_body,
     )
@@ -355,3 +367,27 @@ def apply_object_eef_weld(
         pos_error_m=pos_err,
         quat_error=quat_err,
     )
+
+
+def check_fixture_grasped(raw_env, fixture_body_name: str, *, gripper_closed_threshold: float = 0.035, near_threshold: float = 0.15) -> bool:
+    """Grasp check for a fixture part (no robosuite object registered -- e.g. CloseBlenderLid's
+    blender_lid, StartElectricKettle's kettle lid, both fixture-only tasks with no
+    ``_get_obj_cfgs``).
+
+    ``robocasa.utils.object_utils.check_obj_grasped`` needs ``env.objects[name]`` for its
+    contact check, which fixtures never have. Substitutes proximity for contact, reusing the
+    same gripper-closed test and the exact distance metric/threshold (0.15m) the task's own
+    success check already uses for this fixture (``OU.gripper_fxtr_far``) -- calibrated against
+    the actual weld relpose recorded in the CloseBlenderLid training demos (gripper-to-body
+    distance ~0.12-0.14m at the moment of grasp), not a guessed number.
+    """
+    from robocasa.utils.object_utils import gripper_fxtr_far
+
+    gripper_joints = ["gripper0_right_finger_joint1", "gripper0_right_finger_joint2"]
+    gripper_joint_positions = [
+        raw_env.sim.data.qpos[raw_env.sim.model.get_joint_qpos_addr(joint)] for joint in gripper_joints
+    ]
+    gripper_closed = all(pos < gripper_closed_threshold for pos in gripper_joint_positions)
+    if not gripper_closed:
+        return False
+    return not gripper_fxtr_far(raw_env, fixture_body_name, th=near_threshold)
